@@ -8,7 +8,7 @@ import Area from "../lib/CalculateArea.tsx";
 
 import LogoIcon26px from "../assets/icons/logo-26px.svg";
 import SettingsIcon21px from "../assets/icons/settings-21px.svg";
-import EyedropperIcon21px from "../assets/icons/eyedropperhalffull-21px.svg";
+import EyedropperIcon21px from "../assets/icons/eyedropper-21px.svg";
 import FolderOpen21px from "../assets/icons/folderopen-21px.svg";
 
 function Dashboard() {
