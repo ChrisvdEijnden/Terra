@@ -5,7 +5,6 @@
     justify-content: center;
     width: 100%;
     height: calc(100vh - 56px);
-    padding: 16px;
     background-color: var(--color-bg-app);
     box-sizing: border-box;
     gap: 16px;
