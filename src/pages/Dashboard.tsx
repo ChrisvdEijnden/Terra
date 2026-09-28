@@ -38,6 +38,7 @@ function Dashboard() {
     const [imageUrl, setImageUrl] = useState<string | null>(null);
     const [naturalImageData, setNaturalImageData] = useState<ImageData | null>(null);
     const [hsvValue, setHsvValue] = useState(1);
+    const [noise, setNoise] = useState<number>(0);
 
     const [clickedHue, setClickedHue] = useState<number | null>(null);
     const [picking, setPicking] = useState(true);
@@ -115,8 +116,8 @@ function Dashboard() {
 
     const maskResult = useMemo(() => {
         if (!naturalImageData || clickedHue === null) return null;
-        return computeWaterMask(naturalImageData, clickedHue, hsvValue, deselectedLabels);
-    }, [naturalImageData, clickedHue, hsvValue, deselectedLabels]);
+        return computeWaterMask(naturalImageData, clickedHue, hsvValue, deselectedLabels, noise);
+    }, [naturalImageData, clickedHue, hsvValue, deselectedLabels, noise]);
 
     const area = useMemo(() => {
         if (!maskResult || gsd === null || !(gsd > 0)) return null;
@@ -264,6 +265,23 @@ function Dashboard() {
                 </div>
 
                 <div className="system-actions">
+                    <div className="noise">
+                        <p>
+                            Noise Threshold:{" "}
+                            <input
+                                type="number"
+                                step="1"
+                                min="0"
+                                placeholder="0"
+                                value={noise}
+                                onChange={(e) => {
+                                    const v = parseInt(e.target.value, 10);
+                                    setNoise(Number.isFinite(v) && v >= 0 ? v : 0);
+                                }}
+                            />
+                            px
+                        </p>
+                    </div>
                     <div className="gsd">
                         <p>
                             GSD:{" "}

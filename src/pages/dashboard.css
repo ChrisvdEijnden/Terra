@@ -11,7 +11,7 @@
     transition: background-color 0.2s ease;
 }
 
-.area, .gsd {
+.area, .gsd, .noise {
     box-sizing: border-box;
     width: fit-content;
     height: 26px;
@@ -30,13 +30,13 @@
     cursor: pointer;
 }
 
-.gsd {
+.gsd, .noise {
     background-color: var(--color-bg-surface);
     color: var(--color-text-primary);
     border: 2px solid var(--color-border);
 }
 
-.gsd input {
+.gsd input, .noise input {
     font-size: 13px;
     font-family: "Figtree", sans-serif;
     padding: 4px;
@@ -49,7 +49,11 @@
     background-color: var(--color-bg-surface);
 }
 
-.area p, .gsd p {
+.noise input {
+    width: 45px;
+}
+
+.area p, .gsd p, .noise p {
     font-size: 13px;
     font-weight: 400;
     font-family: "Figtree", sans-serif;

@@ -1,5 +1,3 @@
-const NOISE_AREA_PX = 35; // masks smaller than this are treated as noise
-
 export type LabelId = number;
 
 export interface WaterMaskResult {
@@ -101,7 +99,8 @@ export function computeWaterMask(
     imageData: ImageData,
     clickedHue: number | null,
     toleranceHue: number,
-    deselectedLabels: Set<LabelId> = new Set()
+    deselectedLabels: Set<LabelId> = new Set(),
+    noiseArea: number
 ): WaterMaskResult | null {
     if (clickedHue === null) return null;
 
@@ -119,7 +118,7 @@ export function computeWaterMask(
 
     const validLabels = new Set<LabelId>();
     areas.forEach((area, label) => {
-        if (area >= NOISE_AREA_PX) validLabels.add(label);
+        if (area >= noiseArea) validLabels.add(label);
     });
 
     const selectedMask = new Uint8Array(labels.length);
