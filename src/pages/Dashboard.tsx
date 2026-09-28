@@ -43,6 +43,8 @@ function Dashboard() {
     const [picking, setPicking] = useState(true);
     const [deselectedLabels, setDeselectedLabels] = useState<Set<number>>(new Set());
 
+    const [gsd, setGsd] = useState<number | null>(null);
+
     const handleFileChange = useCallback(
         (event: React.ChangeEvent<HTMLInputElement>) => {
             const file = event.target.files?.[0];
@@ -116,18 +118,20 @@ function Dashboard() {
         return computeWaterMask(naturalImageData, clickedHue, hsvValue, deselectedLabels);
     }, [naturalImageData, clickedHue, hsvValue, deselectedLabels]);
 
-    const area = useMemo(
-        () => (maskResult ? calculateArea(maskResult.pixelCount) : 0),
-        [maskResult]
-    );
+    const area = useMemo(() => {
+        if (!maskResult || gsd === null || !(gsd > 0)) return null;
+        return calculateArea(maskResult.pixelCount, gsd);
+    }, [maskResult, gsd]);
 
     const areaLabelText = !imageUrl
         ? "Open an image to start"
         : picking
             ? "Click water to set reference color"
-            : maskResult
-                ? `Area: ${area.toFixed(3)} ha`
-                : "Click water to start";
+            : !maskResult
+                ? "Click water to start"
+                : area === null
+                    ? "Enter GSD to compute area"
+                    : `Area: ${area.toFixed(3)} ha`;
 
     const draw = useCallback(() => {
         const canvas = canvasRef.current;
@@ -260,10 +264,26 @@ function Dashboard() {
                 </div>
 
                 <div className="system-actions">
+                    <div className="gsd">
+                        <p>
+                            GSD:{" "}
+                            <input
+                                type="number"
+                                step="any"
+                                min="0"
+                                placeholder="0.0883"
+                                value={gsd ?? ""}
+                                onChange={(e) =>
+                                    setGsd(e.target.value === "" ? null : parseFloat(e.target.value))
+                                }
+                            />
+                            m
+                        </p>
+                    </div>
                     <div
                         className="area"
                         onClick={() => {
-                            if (clickedHue !== null) CopyToClipboard(area);
+                            if (area !== null) CopyToClipboard(area);
                         }}
                     >
                         <p>{areaLabelText}</p>

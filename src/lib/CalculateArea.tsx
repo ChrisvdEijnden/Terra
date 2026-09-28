@@ -1,5 +1,4 @@
 const NOISE_AREA_PX = 35; // masks smaller than this are treated as noise
-const GSD_METERS = 0.0883; // ground sample distance
 
 export type LabelId = number;
 
@@ -197,8 +196,9 @@ export function buildOverlayImageData(
     return new ImageData(data, width, height);
 }
 
-export function calculateArea(pixelCount: number): number {
-    return (GSD_METERS ** 2) * pixelCount / 10000;
+export function calculateArea(pixelCount: number, gsdMeters: number): number {
+    if (!Number.isFinite(gsdMeters) || gsdMeters <= 0) return NaN;
+    return (gsdMeters ** 2) * pixelCount / 10000;
 }
 
 export default calculateArea;
