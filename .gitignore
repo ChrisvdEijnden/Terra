@@ -22,3 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Stitcher output from older builds (now written to the app data folder)
+src/lib/panorama.png
+src/lib/selected_images.json

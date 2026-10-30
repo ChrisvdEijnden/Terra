@@ -18,7 +18,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' blob: data:; connect-src ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self' http://localhost:1420; script-src 'self' 'unsafe-inline' http://localhost:1420; style-src 'self' 'unsafe-inline' http://localhost:1420; font-src 'self' data: http://localhost:1420; img-src 'self' blob: data: http://localhost:1420; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 ws://localhost:1421; worker-src 'self' blob: http://localhost:1420; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ]
     }
   },
   "bundle": {
@@ -30,6 +34,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "python/photo_stitcher.py": "python/photo_stitcher.py",
+      "python/requirements.txt": "python/requirements.txt"
+    }
   }
 }

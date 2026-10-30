@@ -1,0 +1,8 @@
+# Python packages for Terra's stitcher (src-tauri/python/photo_stitcher.py).
+# Install into a virtual environment:  pip install -r src-tauri/python/requirements.txt
+#
+# stitching pulls in OpenCV (opencv-python). photo_stitcher.py subclasses
+# stitching's AffineStitcher and relies on its 0.7 internals, so stay on 0.7.x.
+stitching>=0.7,<0.8
+numpy>=1.24
+Pillow>=10.0
