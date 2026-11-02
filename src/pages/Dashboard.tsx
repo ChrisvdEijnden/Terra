@@ -41,6 +41,7 @@ import {
     type View,
 } from "../lib/viewport.ts";
 import CopyToClipboard from "../lib/CopyToClipboard.tsx";
+import { useTranslation } from "../lib/useTranslations.ts";
 
 import LogoIcon26px from "../assets/icons/logo-26px.svg";
 import SettingsIcon21px from "../assets/icons/settings-21px.svg";
@@ -52,14 +53,9 @@ import Trash21px from "../assets/icons/trash-21px.svg";
 import Cancel21px from "../assets/icons/cancel-21px.svg";
 import Fit21px from "../assets/icons/fit-21px.svg";
 
-const NO_COLOUR_MESSAGE =
-    "That spot has no usable colour (no data, too grey or too dark). Click on the water.";
 const CLICK_MOVE_THRESHOLD = 4; // px; a press that moves less than this is a click
 const CLEAR_CONFIRM_MS = 3000;
 const NOISE_DEBOUNCE_MS = 150;
-const EARLIER_STITCH_MESSAGE = "Stitching (started earlier)…";
-const EARLIER_STITCH_FAILED_MESSAGE = "The earlier stitch did not finish; click Stitch again";
-const ANALYSIS_CRASHED_MESSAGE = "Image analysis stopped unexpectedly; measuring is unavailable for this image";
 /** Keeps the top of the image clear of the persistent notice (top 12 + height 30 + gap 8). */
 const NOTICE_PADDING: Padding = { ...DEFAULT_PADDING, top: 50 };
 const EMPTY_SET: ReadonlySet<LabelId> = new Set();
@@ -143,11 +139,15 @@ function formatGsd(v: number): string {
     return String(Number(v.toPrecision(4)));
 }
 
-const numberFormat = new Intl.NumberFormat();
+const AREA_FORMAT: Intl.NumberFormatOptions = { minimumFractionDigits: 3, maximumFractionDigits: 3, useGrouping: false };
 
 function Dashboard() {
     const navigate = useNavigate();
     const mask = useWaterMask();
+    const { t, language } = useTranslation();
+    // For the image loading effect: a language change must not reload the image
+    const tRef = useRef(t);
+    tRef.current = t;
 
     // ---- refs for the canvas / view (not React state: they change every frame)
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -237,9 +237,9 @@ function Dashboard() {
         try {
             applyProject(seq, await getProject());
         } catch (err) {
-            if (seq === stateSeqRef.current) showError(`Could not load the project: ${errorMessage(err)}`);
+            if (seq === stateSeqRef.current) showError(t("dashboard.loadProjectFailed", { error: errorMessage(err) }));
         }
-    }, [applyProject, showError]);
+    }, [applyProject, showError, t]);
 
     useEffect(() => {
         void refreshProject();
@@ -263,15 +263,15 @@ function Dashboard() {
         if (localStitching || activeRunRef.current !== null) return;
         if (backendStitching) {
             if (!was) earlierPanoMtimeRef.current = project?.panorama?.mtimeMs ?? null;
-            setStatus((s) => s ?? { kind: "progress", text: EARLIER_STITCH_MESSAGE });
+            setStatus((s) => s ?? { kind: "progress", text: t("dashboard.earlierStitch") });
         } else if (was) {
             const pano = project?.panorama ?? null;
             const finished = !!pano && pano.mtimeMs !== earlierPanoMtimeRef.current;
             setStatus((s) =>
-                s?.kind === "progress" ? (finished ? null : { kind: "warning", text: EARLIER_STITCH_FAILED_MESSAGE }) : s
+                s?.kind === "progress" ? (finished ? null : { kind: "warning", text: t("dashboard.earlierStitchFailed") }) : s
             );
         }
-    }, [project, localStitching]);
+    }, [project, localStitching, t]);
 
     // Progress lines from the stitcher, only for the run this page started.
     useEffect(() => {
@@ -313,7 +313,7 @@ function Dashboard() {
         const runId = Date.now();
         activeRunRef.current = runId;
         setLocalStitching(true);
-        setStatus({ kind: "progress", text: "Starting the stitcher…" });
+        setStatus({ kind: "progress", text: t("dashboard.startingStitcher") });
         const seq = ++stateSeqRef.current;
         try {
             const state = await stitchImages(runId);
@@ -323,13 +323,13 @@ function Dashboard() {
         } catch (err) {
             activeRunRef.current = null;
             const msg = errorMessage(err);
-            if (msg === STITCH_CANCELLED) setStatus({ kind: "info", text: STITCH_CANCELLED });
-            else setStatus({ kind: "error", text: /^stitching/i.test(msg) ? msg : `Stitching failed: ${msg}` });
+            if (msg === STITCH_CANCELLED) setStatus({ kind: "info", text: t("dashboard.stitchCancelled") });
+            else setStatus({ kind: "error", text: /^stitching/i.test(msg) ? msg : t("dashboard.stitchFailed", { error: msg }) });
             void refreshProject();
         } finally {
             setLocalStitching(false);
         }
-    }, [applyProject, refreshProject]);
+    }, [applyProject, refreshProject, t]);
 
     const pick = useCallback(
         async (mode: PickMode) => {
@@ -359,20 +359,20 @@ function Dashboard() {
     }, [cancelClearConfirm, clearStatus, runStitch]);
 
     const onCancelStitch = useCallback(async () => {
-        setStatus({ kind: "progress", text: "Cancelling…" });
+        setStatus({ kind: "progress", text: t("dashboard.cancelling") });
         try {
             const killed = await cancelStitch();
             if (activeRunRef.current === null) {
                 // not our run (or already finished): report and resync; keep an error or result
                 // that arrived meanwhile
-                if (killed) setStatus({ kind: "info", text: STITCH_CANCELLED });
+                if (killed) setStatus({ kind: "info", text: t("dashboard.stitchCancelled") });
                 else setStatus((s) => (s?.kind === "progress" ? null : s));
                 void refreshProject();
             }
         } catch (err) {
-            showError(`Could not cancel: ${errorMessage(err)}`);
+            showError(t("dashboard.cancelFailed", { error: errorMessage(err) }));
         }
-    }, [refreshProject, showError]);
+    }, [refreshProject, showError, t]);
 
     const onClear = useCallback(async () => {
         if (!confirmClear) {
@@ -540,10 +540,10 @@ function Dashboard() {
                 try {
                     await image.decode();
                 } catch {
-                    throw new Error("the file could not be decoded as an image");
+                    throw new Error(tRef.current("dashboard.decodeFailed"));
                 }
                 if (cancelled) return;
-                if (image.naturalWidth === 0 || image.naturalHeight === 0) throw new Error("the image is empty");
+                if (image.naturalWidth === 0 || image.naturalHeight === 0) throw new Error(tRef.current("dashboard.imageEmpty"));
 
                 // swap in the new image
                 if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
@@ -561,7 +561,7 @@ function Dashboard() {
                 } catch (err) {
                     setStatus({
                         kind: "error",
-                        text: `Could not read the image pixels, measuring is unavailable: ${errorMessage(err)}`,
+                        text: tRef.current("dashboard.readPixelsFailed", { error: errorMessage(err) }),
                     });
                 }
                 setLoaded({ key: displayKey, ...size, maskImageId });
@@ -573,7 +573,10 @@ function Dashboard() {
                 imageUrlRef.current = null;
                 setLoaded(null);
                 requestDraw();
-                setStatus({ kind: "error", text: `Could not open ${baseName(displayPath)}: ${errorMessage(err)}` });
+                setStatus({
+                    kind: "error",
+                    text: tRef.current("dashboard.openFailed", { name: baseName(displayPath), error: errorMessage(err) }),
+                });
             } finally {
                 if (url) URL.revokeObjectURL(url); // created but not used
                 if (!cancelled) setImageLoading(false);
@@ -667,23 +670,23 @@ function Dashboard() {
             const maskImageId = sendPixelsToWorker(readPixels(image));
             setLoaded({ ...current, maskImageId });
             if (refHue !== null) requestSegmentation({ refHue, tolerance });
-            setStatus({ kind: "info", text: "Image analysis stopped unexpectedly and was restarted" });
+            setStatus({ kind: "info", text: t("dashboard.analysisRestarted") });
         } catch {
             // stays "Measuring unavailable"
         }
-    }, [analysisCrashed, current, refHue, tolerance, sendPixelsToWorker, requestSegmentation]);
+    }, [analysisCrashed, current, refHue, tolerance, sendPixelsToWorker, requestSegmentation, t]);
 
     let areaLabelText: string;
-    if (!displaySource) areaLabelText = "Open images to start";
-    else if (imageLoading || (current && mask.analysing)) areaLabelText = "Loading image…";
-    else if (!current) areaLabelText = "Image unavailable";
-    else if (current.maskImageId === 0 || analysisCrashed) areaLabelText = "Measuring unavailable";
-    else if (picking) areaLabelText = "Click water to set the reference colour";
-    else if (refHue === null) areaLabelText = "Pick a reference colour";
-    else if (pixelCount === null) areaLabelText = "Finding water…";
-    else if (area === null) areaLabelText = `${numberFormat.format(pixelCount)} px · enter the GSD`;
-    else areaLabelText = `Area: ${area.toFixed(3)} ha`;
-    if (copied && area !== null) areaLabelText = "Copied";
+    if (!displaySource) areaLabelText = t("dashboard.openImagesToStart");
+    else if (imageLoading || (current && mask.analysing)) areaLabelText = t("dashboard.loadingImage");
+    else if (!current) areaLabelText = t("dashboard.imageUnavailable");
+    else if (current.maskImageId === 0 || analysisCrashed) areaLabelText = t("dashboard.measuringUnavailable");
+    else if (picking) areaLabelText = t("dashboard.clickWater");
+    else if (refHue === null) areaLabelText = t("dashboard.pickReferenceColour");
+    else if (pixelCount === null) areaLabelText = t("dashboard.findingWater");
+    else if (area === null) areaLabelText = t("dashboard.pixelsEnterGsd", { pixels: pixelCount.toLocaleString(language) });
+    else areaLabelText = t("dashboard.area", { area: area.toLocaleString(language, AREA_FORMAT) });
+    if (copied && area !== null) areaLabelText = t("dashboard.copied");
 
     const scaleUnverified = showingPanorama && !panorama!.gpsAligned;
 
@@ -694,17 +697,17 @@ function Dashboard() {
                 setCopied(true);
                 window.setTimeout(() => setCopied(false), 1200);
             },
-            (err) => showError(`Could not copy: ${errorMessage(err)}`)
+            (err) => showError(t("dashboard.copyFailed", { error: errorMessage(err) }))
         );
-    }, [area, showError]);
+    }, [area, showError, t]);
 
     // ---- canvas interaction
     const handleCanvasClick = (x: number, y: number) => {
         const info = mask.hueInfo;
         if (!imageRef.current || !current) return;
         if (!analysisReady || !info) {
-            if (analysisCrashed) setStatus({ kind: "error", text: ANALYSIS_CRASHED_MESSAGE });
-            else if (current.maskImageId !== 0) setStatus({ kind: "info", text: "Still analysing the image…" });
+            if (analysisCrashed) setStatus({ kind: "error", text: t("dashboard.analysisCrashed") });
+            else if (current.maskImageId !== 0) setStatus({ kind: "info", text: t("dashboard.stillAnalysing") });
             return;
         }
         const p = screenToImage(viewRef.current, x, y);
@@ -713,7 +716,7 @@ function Dashboard() {
         if (picking) {
             const hue = info.hue[p.y * info.width + p.x];
             if (hue === INELIGIBLE) {
-                setStatus({ kind: "warning", text: NO_COLOUR_MESSAGE });
+                setStatus({ kind: "warning", text: t("dashboard.noColour") });
                 return;
             }
             setStatus((s) => (s && s.kind !== "progress" ? null : s));
@@ -875,11 +878,11 @@ function Dashboard() {
               : "grab";
 
     const busyText = imageLoading
-        ? "Loading image…"
+        ? t("dashboard.loadingImage")
         : mask.analysing
-          ? "Analysing image…"
+          ? t("dashboard.analysingImage")
           : mask.segmenting
-            ? "Finding water…"
+            ? t("dashboard.findingWater")
             : null;
 
     const showStitchAgain = !stitching && images.length >= 2 && (!panorama || stale);
@@ -889,12 +892,12 @@ function Dashboard() {
         : stale
           ? {
                 kind: "warning" as const,
-                text: `Panorama is out of date: built from ${includedCount} of ${images.length} images`,
+                text: t("dashboard.panoramaStale", { included: includedCount, total: images.length }),
             }
           : panorama.includedImages.length < panorama.images.length
             ? {
                   kind: "info" as const,
-                  text: `${panorama.includedImages.length} of ${panorama.images.length} images could be stitched into the panorama`,
+                  text: t("dashboard.partialPanorama", { included: panorama.includedImages.length, total: panorama.images.length }),
               }
             : null;
 
@@ -923,13 +926,13 @@ function Dashboard() {
 
                     <div className="spacer"></div>
 
-                    <h2>Dashboard</h2>
+                    <h2>{t("dashboard.title")}</h2>
                 </div>
 
                 <div className="system-actions">
-                    <div className="noise" title="Ignore water patches smaller than this many panorama pixels">
+                    <div className="noise" title={t("dashboard.noiseHint")}>
                         <p>
-                            Noise Threshold:{" "}
+                            {t("dashboard.noiseLabel")}{" "}
                             <input
                                 type="number"
                                 step="1"
@@ -941,7 +944,7 @@ function Dashboard() {
                             px
                         </p>
                     </div>
-                    <div className="gsd" title="Ground sampling distance: metres per pixel of one source photo">
+                    <div className="gsd" title={t("dashboard.gsdHint")}>
                         <p>
                             GSD:{" "}
                             <input
@@ -961,8 +964,8 @@ function Dashboard() {
                             />
                             m/px
                             {gsdIsEstimate && (
-                                <span className="gsd-estimate" title="Estimated from GPS">
-                                    est.
+                                <span className="gsd-estimate" title={t("dashboard.estimatedFromGps")}>
+                                    {t("dashboard.estimateShort")}
                                 </span>
                             )}
                         </p>
@@ -970,14 +973,14 @@ function Dashboard() {
                     <div
                         className={`area${area !== null ? " copyable" : ""}`}
                         onClick={onAreaClick}
-                        title={area !== null ? "Click to copy the area in hectares" : undefined}
+                        title={area !== null ? t("dashboard.copyAreaHint") : undefined}
                     >
                         <p>{areaLabelText}</p>
                         {scaleUnverified && (
                             <span
                                 className="area-warning"
-                                title="Scale not verified by GPS - check the GSD"
-                                aria-label="Scale not verified by GPS - check the GSD"
+                                title={t("dashboard.scaleUnverified")}
+                                aria-label={t("dashboard.scaleUnverified")}
                             >
                                 !
                             </span>
@@ -985,33 +988,33 @@ function Dashboard() {
                     </div>
 
                     <div className="right-system-actions">
-                        <button onClick={() => void pick("replace")} disabled={stitching} title="Open images (replaces the current set)">
-                            <img src={FolderOpen21px} alt="Open images" />
+                        <button onClick={() => void pick("replace")} disabled={stitching} title={t("dashboard.openImagesHint")}>
+                            <img src={FolderOpen21px} alt={t("dashboard.openImages")} />
                         </button>
-                        <button onClick={() => void pick("add")} disabled={stitching} title="Add images to the current set">
-                            <img src={ImagePlus21px} alt="Add images" />
+                        <button onClick={() => void pick("add")} disabled={stitching} title={t("dashboard.addImagesHint")}>
+                            <img src={ImagePlus21px} alt={t("dashboard.addImages")} />
                         </button>
                         {showStitchAgain && (
-                            <button onClick={onStitchAgain} title="Stitch the current images again">
-                                <img src={StitchAgain21px} alt="Stitch again" />
+                            <button onClick={onStitchAgain} title={t("dashboard.stitchAgainHint")}>
+                                <img src={StitchAgain21px} alt={t("dashboard.stitchAgain")} />
                             </button>
                         )}
                         {stitching && (
-                            <button onClick={() => void onCancelStitch()} title="Cancel stitching">
-                                <img src={Cancel21px} alt="Cancel stitching" />
+                            <button onClick={() => void onCancelStitch()} title={t("dashboard.cancelStitching")}>
+                                <img src={Cancel21px} alt={t("dashboard.cancelStitching")} />
                             </button>
                         )}
                         <button
                             className={confirmClear ? "confirm" : undefined}
                             onClick={() => void onClear()}
                             disabled={stitching || (images.length === 0 && !panorama)}
-                            title={confirmClear ? "Click again to clear all images" : "Clear all images"}
+                            title={confirmClear ? t("dashboard.clearConfirmHint") : t("dashboard.clearAllHint")}
                         >
-                            <img src={Trash21px} alt="Clear images" />
-                            {confirmClear && <span>Clear all?</span>}
+                            <img src={Trash21px} alt={t("dashboard.clearImages")} />
+                            {confirmClear && <span>{t("dashboard.clearConfirm")}</span>}
                         </button>
-                        <button onClick={() => navigate("/settings")} title="Settings">
-                            <img src={SettingsIcon21px} alt="Settings" />
+                        <button onClick={() => navigate("/settings")} title={t("settings.title")}>
+                            <img src={SettingsIcon21px} alt={t("settings.title")} />
                         </button>
                     </div>
                 </div>
@@ -1032,11 +1035,11 @@ function Dashboard() {
 
                 {!displaySource && (
                     <div className="empty-state">
-                        <h3>No images yet</h3>
-                        <p>Open drone photos to stitch them into a panorama and measure water.</p>
+                        <h3>{t("dashboard.noImagesTitle")}</h3>
+                        <p>{t("dashboard.noImagesText")}</p>
                         <button onClick={() => void pick("replace")} disabled={stitching}>
                             <img src={FolderOpen21px} alt="" />
-                            Open images
+                            {t("dashboard.openImages")}
                         </button>
                     </div>
                 )}
@@ -1053,7 +1056,7 @@ function Dashboard() {
                                 {status.kind === "progress" && <span className="spinner" aria-hidden="true" />}
                                 <span className="text">{status.text}</span>
                                 {status.kind !== "progress" && (
-                                    <button className="dismiss" onClick={clearStatus} title="Dismiss" aria-label="Dismiss">
+                                    <button className="dismiss" onClick={clearStatus} title={t("dashboard.dismiss")} aria-label={t("dashboard.dismiss")}>
                                         ×
                                     </button>
                                 )}
@@ -1068,12 +1071,12 @@ function Dashboard() {
                         id="color-picker"
                         role="button"
                         aria-pressed={picking}
-                        title="Pick a new reference colour"
+                        title={t("dashboard.newColourHint")}
                         onClick={() => setPicking((active) => !active)}
                     >
-                        <img src={EyedropperIcon21px} alt="Colour picker" />
+                        <img src={EyedropperIcon21px} alt={t("dashboard.colourPicker")} />
                     </div>
-                    <div className="slider-container" title="Colour tolerance (hue)">
+                    <div className="slider-container" title={t("dashboard.toleranceHint")}>
                         <input
                             type="range"
                             min="1"
@@ -1086,8 +1089,8 @@ function Dashboard() {
                         />
                         <span className="slider-value">±{tolerance}</span>
                     </div>
-                    <button className="fit-button" onClick={fit} disabled={!current} title="Fit to window (0) · zoom with +/- or the scroll wheel">
-                        <img src={Fit21px} alt="Fit to window" />
+                    <button className="fit-button" onClick={fit} disabled={!current} title={t("dashboard.fitHint")}>
+                        <img src={Fit21px} alt={t("dashboard.fitToWindow")} />
                     </button>
                 </div>
 

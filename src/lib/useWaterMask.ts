@@ -3,6 +3,7 @@
 // results for outdated parameters or images are dropped).
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MaskRequest, MaskResponse } from "./maskProtocol.ts";
+import { useTranslation } from "./useTranslations.ts";
 
 export interface HueInfo {
     imageId: number;
@@ -33,6 +34,9 @@ export interface SegmentParams {
 }
 
 export function useWaterMask() {
+    const { t } = useTranslation();
+    const tRef = useRef(t);
+    tRef.current = t;
     const workerRef = useRef<Worker | null>(null);
     const imageCounter = useRef(0);
     const jobCounter = useRef(0);
@@ -74,7 +78,11 @@ export function useWaterMask() {
             setSegmentation(null);
             setAnalysing(false);
             setSegmenting(false);
-            setError(`Image analysis stopped unexpectedly${event.message ? `: ${event.message}` : ""}`);
+            setError(
+                event.message
+                    ? tRef.current("dashboard.analysisStoppedDetail", { error: event.message })
+                    : tRef.current("dashboard.analysisStopped")
+            );
         };
         workerRef.current = worker;
         return worker;

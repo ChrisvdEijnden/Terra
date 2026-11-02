@@ -387,3 +387,126 @@
     width: 18px;
     height: 18px;
 }
+
+/* Settings */
+.content-settings {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    height: calc(100vh - 56px);
+    padding: 24px;
+    background-color: var(--color-bg-app);
+    overflow-y: auto;
+    transition: background-color 0.2s ease;
+}
+
+.content-settings > div {
+    width: 100%;
+    max-width: 640px;
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 16px 20px;
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.setting-row-text {
+    min-width: 0;
+}
+
+.setting-row-text h3 {
+    margin: 0;
+    font-family: "Figtree", sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.setting-row-text p {
+    margin: 4px 0 0;
+    font-family: "Figtree", sans-serif;
+    font-size: 13px;
+    color: var(--color-text-secondary);
+}
+
+.language-toggle, .theme-toggle {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    flex-shrink: 0;
+    height: 30px;
+    margin: 0;
+    padding: 2px;
+    background-color: var(--color-bg-app);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+}
+
+.language-toggle {
+    width: 88px;
+}
+
+.theme-toggle {
+    width: 60px;
+    cursor: pointer;
+}
+
+.language-toggle-option {
+    position: relative;
+    z-index: 1;
+    margin: 0;
+    padding: 0;
+    background-color: transparent;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: "Figtree", sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    transition: color 0.15s ease;
+}
+
+.language-toggle-option[aria-checked="true"] {
+    color: var(--color-text-primary);
+}
+
+.theme-toggle-icon {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.language-toggle-thumb, .theme-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    box-shadow: 0 1px 2px var(--color-shadow);
+    transition: transform 0.2s ease, background-color 0.2s ease;
+}
+
+.language-toggle[data-active="en"] .language-toggle-thumb,
+.theme-toggle[aria-checked="true"] .theme-toggle-thumb {
+    transform: translateX(100%);
+}
+
+.language-toggle-option:focus-visible, .theme-toggle:focus-visible {
+    outline: 2px solid var(--color-brand-accent);
+    outline-offset: 2px;
+}
