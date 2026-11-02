@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "terra-vite",
+      "runtimeExecutable": "/private/tmp/claude-501/-Users-chrisvandeneijnden-Desktop-Terra/b0e94ffd-6d5b-4d4a-a3de-2e014ae2dd83/scratchpad/fe/node_modules/.bin/vite",
+      "runtimeArgs": ["/private/tmp/claude-501/-Users-chrisvandeneijnden-Desktop-Terra/b0e94ffd-6d5b-4d4a-a3de-2e014ae2dd83/scratchpad/fe", "--port", "1420", "--strictPort"],
+      "port": 1420
+    },
+    {
+      "name": "terra-mock-backend",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-I", "/private/tmp/claude-501/-Users-chrisvandeneijnden-Desktop-Terra/b0e94ffd-6d5b-4d4a-a3de-2e014ae2dd83/scratchpad/mock_backend.py", "8765"],
+      "port": 8765,
+      "url": "http://127.0.0.1:8765"
+    }
+  ]
+}

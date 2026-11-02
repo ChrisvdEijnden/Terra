@@ -438,6 +438,8 @@ function Dashboard() {
 
     useEffect(() => () => {
         if (drawPendingRef.current) cancelAnimationFrame(drawPendingRef.current);
+        // reset, or requestDraw() would skip every later frame after a remount (StrictMode in dev)
+        drawPendingRef.current = 0;
     }, []);
 
     const imageSize = (): Size | null => {
