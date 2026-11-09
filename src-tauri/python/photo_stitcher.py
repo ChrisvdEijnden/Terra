@@ -8,9 +8,11 @@ Input:  {"images": ["/abs/a.JPG", ...]}
 Output (in --output-dir, only on success):
   panorama.png  RGBA; alpha 255 where there is image data, 0 where there is none
   result.json   {"panorama", "images", "included_images", "width", "height",
-                 "gps_aligned", "estimated_gsd", "pano_scale"}
+                 "gps_aligned", "estimated_gsd", "pano_scale", "geotransform"}
                  estimated_gsd: metres per full-resolution source-image pixel (GPS path only)
                  pano_scale:    panorama pixels per full-resolution source-image pixel
+                 geotransform:  GDAL-style [lon0, dlon, 0, lat0, 0, dlat] in WGS84 degrees,
+                                from pixel-edge (col, row) to (lon, lat) (GPS path only)
 
 Progress goes to stderr, one short line per event. A handled failure ends with
 "ERROR: <sentence>" on stderr and exit code 2; normally nothing is written in
@@ -257,6 +259,8 @@ class GpsLayout:
         e2 = f * (2 - f)
         den = 1 - e2 * math.sin(lat0) ** 2
         m, nu = a * (1 - e2) / den ** 1.5, a / math.sqrt(den)
+        self.origin = (float(lon.mean()), float(lat.mean()))  # where xy == (0, 0)
+        self.metres_per_degree = (math.radians(1) * nu * math.cos(lat0), math.radians(1) * m)  # east, north
         self.xy = np.c_[
             np.radians(lon - lon.mean()) * nu * math.cos(lat0),
             np.radians(lat - lat.mean()) * m,
@@ -626,6 +630,32 @@ def unit_similarity(image_to_pano, size):
     return unit
 
 
+def fit_north_up(pixels, ground, fallback_scale, min_spread=20.0):
+    """(scale, east0, north0) of the north-up map east = east0 + scale * col,
+    north = north0 - scale * row, fitted by least squares to image centres in the
+    panorama (pixels) and on the ground (metres). One pass drops images far off the
+    consensus (GPS spikes). Images closer together than min_spread metres (RMS) say
+    nothing reliable about scale, so fallback_scale is used for those."""
+
+    def solve(keep):
+        p, g = pixels[keep], ground[keep]
+        p_mean, g_mean = p.mean(axis=0), g.mean(axis=0)
+        dp, dg = p - p_mean, g - g_mean
+        denom = float((dp ** 2).sum())
+        scale = fallback_scale
+        if denom > 0 and math.sqrt(float((dg ** 2).sum()) / len(g)) >= min_spread:
+            fitted = float((dp[:, 0] * dg[:, 0] - dp[:, 1] * dg[:, 1]).sum()) / denom
+            if math.isfinite(fitted) and fitted > 0:
+                scale = fitted
+        return scale, g_mean[0] - scale * p_mean[0], g_mean[1] + scale * p_mean[1]
+
+    everything = np.ones(len(pixels), bool)
+    scale, east0, north0 = solve(everything)
+    off = np.hypot(east0 + scale * pixels[:, 0] - ground[:, 0], north0 - scale * pixels[:, 1] - ground[:, 1])
+    keep = off <= max(2.0, 3 * float(np.median(off)))
+    return solve(keep) if keep.sum() >= 2 else (scale, east0, north0)
+
+
 def affine_camera(image_to_pano, size):
     """cv2.detail.CameraParams equivalent to what AffineBasedEstimator produces
     (focal 1, principal point 0, aspect 1, t 0) for an image -> panorama similarity.
@@ -676,6 +706,8 @@ class GpsStitcher(AffineStitcher):
         self.gps_aligned = False
         self.cameras = None
         self.panorama_mask = None
+        self.final_corners = None
+        self.final_sizes = None
 
     # progress reporting wrappers --------------------------------------------
 
@@ -769,6 +801,11 @@ class GpsStitcher(AffineStitcher):
         log("Finding seams between images")
         return super().find_seam_masks(imgs, corners, masks)
 
+    def initialize_composition(self, corners, sizes):
+        self.final_corners = list(corners)
+        self.final_sizes = list(sizes)
+        super().initialize_composition(corners, sizes)
+
     def blend_images(self, imgs, masks, corners):
         n = len(self.images.names)
         step = max(1, n // 10)
@@ -810,6 +847,28 @@ class GpsStitcher(AffineStitcher):
         full_w = self.images.sizes[0][0]
         final_w = self.images.get_scaled_img_sizes(Images.Resolution.FINAL)[0][0]
         return float(median(per_image)) * final_w / full_w
+
+    def image_centres(self):
+        """Centre of every included image in panorama pixels (pixel-edge coordinates).
+        The warp only rotates, so the centre of the warped bounding box is the image centre."""
+        corners = np.array(self.final_corners, float)
+        sizes = np.array(self.final_sizes, float)
+        return corners - corners.min(axis=0) + sizes / 2
+
+    def geotransform(self, pano_scale):
+        """GDAL-style [lon0, dlon, 0, lat0, 0, dlat] of the panorama, None without GPS poses."""
+        if not self.gps_aligned or not self.final_corners:
+            return None
+        layout = self.layout
+        idx = np.array([layout.index[name] for name in self.images.names])
+        pixels, ground = self.image_centres(), layout.xy[idx]
+        straight = ~layout.turn[idx]  # positions are biased for shots taken in a turn
+        if straight.sum() >= 3:
+            pixels, ground = pixels[straight], ground[straight]
+        fallback = layout.gsd / pano_scale if pano_scale else layout.gsd
+        scale, east0, north0 = fit_north_up(pixels, ground, fallback)
+        (lon, lat), (per_lon, per_lat) = layout.origin, layout.metres_per_degree
+        return [lon + east0 / per_lon, scale / per_lon, 0.0, lat + north0 / per_lat, 0.0, -scale / per_lat]
 
 
 # --------------------------------------------------------------------------- I/O
@@ -937,6 +996,7 @@ def run(input_path, output_dir):
         "gps_aligned": bool(stitcher.gps_aligned),
         "estimated_gsd": _positive_or_none(estimated_gsd),
         "pano_scale": _positive_or_none(pano_scale),
+        "geotransform": stitcher.geotransform(pano_scale),
     }
     try:
         pano_tmp = write_png_atomic(pano_path, bgra)

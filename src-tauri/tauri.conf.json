@@ -37,6 +37,7 @@
     ],
     "resources": {
       "python/photo_stitcher.py": "python/photo_stitcher.py",
+      "python/terra_export.py": "python/terra_export.py",
       "python/requirements.txt": "python/requirements.txt"
     }
   }

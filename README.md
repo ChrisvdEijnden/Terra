@@ -5,6 +5,7 @@ Terra is a macOS desktop app for measuring water surface area from drone surveys
 1. Pick a set of overlapping nadir photos from one DJI flight (thermal `_T` or visible `_V`/`_W` images, not both).
 2. Terra stitches them into one north-up panorama with a bundled Python script (OpenCV via the [`stitching`](https://github.com/OpenStitching/stitching) package). For DJI photos, the GPS position, altitude and gimbal yaw in each image's metadata place the images, so long survey strips do not bend.
 3. Click the water colour on the panorama. Terra counts the matching pixels and converts them to hectares using the ground sampling distance (GSD).
+4. Name the project in the breadcrumb and use the download menu to save `orthomosaic_<name>-ir.tif` (GeoTIFF, WGS84), `polygon_<name>.kmz` (water mask) and `hectare_<name>.txt` (area) to `Documents/Terra/<name>`. The GeoTIFF and KMZ need a panorama stitched from photos with GPS data.
 
 Built with Tauri v2 (Rust), React 19, Vite and TypeScript.
 

@@ -9,17 +9,23 @@ import {
     cancelStitch,
     clearProject,
     errorMessage,
+    exportConflicts,
+    exportFiles,
     getProject,
     loadImageBytes,
     onStitchLog,
     pickImages,
+    setProjectName,
+    stageExportMask,
     stitchImages,
     STITCH_CANCELLED,
+    type ExportKind,
     type PickMode,
     type ProjectState,
 } from "../lib/api.ts";
 import {
     areaHectares,
+    buildMask,
     buildOverlay,
     countSelectedPixels,
     INELIGIBLE,
@@ -47,11 +53,10 @@ import LogoIcon26px from "../assets/icons/logo-26px.svg";
 import SettingsIcon21px from "../assets/icons/settings-21px.svg";
 import EyedropperIcon21px from "../assets/icons/eyedropper-21px.svg";
 import FolderOpen21px from "../assets/icons/folderopen-21px.svg";
-import ImagePlus21px from "../assets/icons/image-plus-21px.svg";
+import Download21px from "../assets/icons/download-21px.svg";
 import StitchAgain21px from "../assets/icons/stitch-again-21px.svg";
 import Trash21px from "../assets/icons/trash-21px.svg";
 import Cancel21px from "../assets/icons/cancel-21px.svg";
-import Fit21px from "../assets/icons/fit-21px.svg";
 
 const CLICK_MOVE_THRESHOLD = 4; // px; a press that moves less than this is a click
 const CLEAR_CONFIRM_MS = 3000;
@@ -59,6 +64,7 @@ const NOISE_DEBOUNCE_MS = 150;
 /** Keeps the top of the image clear of the persistent notice (top 12 + height 30 + gap 8). */
 const NOTICE_PADDING: Padding = { ...DEFAULT_PADDING, top: 50 };
 const EMPTY_SET: ReadonlySet<LabelId> = new Set();
+const MAX_PROJECT_NAME = 100; // characters, same limit as the backend
 
 type StatusKind = "progress" | "error" | "warning" | "info";
 interface Status {
@@ -192,6 +198,14 @@ function Dashboard() {
     const [gsdTouched, setGsdTouched] = useState(false);
     const [dragging, setDragging] = useState(false);
     const [copied, setCopied] = useState(false);
+
+    // ---- project name and downloads
+    const [nameDraft, setNameDraft] = useState<string | null>(null); // non-null while editing
+    const nameCancelledRef = useRef(false);
+    const [downloadOpen, setDownloadOpen] = useState(false);
+    const [replacePrompt, setReplacePrompt] = useState<{ kinds: ExportKind[]; files: string[] } | null>(null);
+    const [exporting, setExporting] = useState(false);
+    const downloadMenuRef = useRef<HTMLDivElement | null>(null);
 
     const segmentation = mask.segmentation;
     const deselected = segmentation && deselection.segId === segmentation.jobId ? deselection.labels : EMPTY_SET;
@@ -701,6 +715,102 @@ function Dashboard() {
         );
     }, [area, showError, t]);
 
+    // ---- project name
+    const commitName = async () => {
+        const name = nameDraft;
+        setNameDraft(null);
+        if (nameCancelledRef.current) {
+            nameCancelledRef.current = false;
+            return;
+        }
+        if (name === null || name.trim() === (project?.name ?? "")) return;
+        const seq = ++stateSeqRef.current;
+        try {
+            applyProject(seq, await setProjectName(name));
+        } catch (err) {
+            if (seq === stateSeqRef.current) showError(errorMessage(err));
+        }
+    };
+
+    // ---- downloads
+    const closeDownload = useCallback(() => {
+        setDownloadOpen(false);
+        setReplacePrompt(null);
+    }, []);
+
+    useEffect(() => {
+        if (!downloadOpen) return;
+        const onPointerDown = (e: PointerEvent) => {
+            if (downloadMenuRef.current?.contains(e.target as Node)) return;
+            closeDownload();
+            // this press only closes the menu; it must not also select water
+            if (e.target === canvasRef.current) e.stopPropagation();
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") closeDownload();
+        };
+        window.addEventListener("pointerdown", onPointerDown, true);
+        window.addEventListener("keydown", onKey);
+        return () => {
+            window.removeEventListener("pointerdown", onPointerDown, true);
+            window.removeEventListener("keydown", onKey);
+        };
+    }, [downloadOpen, closeDownload]);
+
+    const saveFiles = async (kinds: ExportKind[]) => {
+        closeDownload();
+        setExporting(true);
+        setStatus({ kind: "progress", text: t("dashboard.exportSaving") });
+        try {
+            if (kinds.includes("polygon")) {
+                if (!segmentation) throw new Error(t("dashboard.exportNeedsWater"));
+                const waterMask = new Uint8Array(segmentation.width * segmentation.height);
+                buildMask(segmentation.labels, segmentation.areas, noise, deselected, waterMask);
+                await stageExportMask(waterMask);
+            }
+            const result = await exportFiles({
+                kinds,
+                fallbackName: t("dashboard.untitled"),
+                areaHectares: area,
+                panoramaMtimeMs: panorama?.mtimeMs ?? null,
+            });
+            setStatus({ kind: "info", text: t("dashboard.exportSaved", { folder: result.folder }) });
+        } catch (err) {
+            setStatus({ kind: "error", text: t("dashboard.exportFailed", { error: errorMessage(err) }) });
+        } finally {
+            setExporting(false);
+        }
+    };
+
+    const startDownload = async (kinds: ExportKind[]) => {
+        try {
+            const files = await exportConflicts(kinds, t("dashboard.untitled"));
+            if (files.length > 0) setReplacePrompt({ kinds, files });
+            else await saveFiles(kinds);
+        } catch (err) {
+            closeDownload();
+            showError(t("dashboard.exportFailed", { error: errorMessage(err) }));
+        }
+    };
+
+    const needsRestitch = showingPanorama && panorama!.gpsAligned && !panorama!.georeferenced;
+    const mapReason =
+        showingPanorama && panorama!.georeferenced
+            ? null
+            : needsRestitch
+              ? t("dashboard.exportNeedsStitch")
+              : t("dashboard.exportNoGps");
+    const waterReason = analysisReady && pixelCount !== null && pixelCount > 0 ? null : t("dashboard.exportNeedsWater");
+    const downloadItems: { kind: ExportKind; label: string; reason: string | null }[] = [
+        { kind: "orthomosaic", label: t("dashboard.downloadOrthomosaic"), reason: mapReason },
+        { kind: "polygon", label: t("dashboard.downloadPolygon"), reason: mapReason ?? waterReason },
+        {
+            kind: "area",
+            label: t("dashboard.downloadArea"),
+            reason: area !== null ? null : pixelCount === null ? t("dashboard.exportNeedsWater") : t("dashboard.exportNeedsGsd"),
+        },
+    ];
+
     // ---- canvas interaction
     const handleCanvasClick = (x: number, y: number) => {
         const info = mask.hueInfo;
@@ -885,7 +995,9 @@ function Dashboard() {
             ? t("dashboard.findingWater")
             : null;
 
-    const showStitchAgain = !stitching && images.length >= 2 && (!panorama || stale);
+    const showStitchAgain = !stitching && !exporting && images.length >= 2 && (!panorama || stale || needsRestitch);
+
+    const projectNameText = nameDraft ?? project?.name ?? "";
 
     const notice = !panorama
         ? null
@@ -927,6 +1039,29 @@ function Dashboard() {
                     <div className="spacer"></div>
 
                     <h2>{t("dashboard.title")}</h2>
+
+                    <div className="spacer"></div>
+
+                    <input
+                        className="project-name"
+                        type="text"
+                        spellCheck={false}
+                        maxLength={MAX_PROJECT_NAME}
+                        value={projectNameText}
+                        placeholder={t("dashboard.untitled")}
+                        aria-label={t("dashboard.projectName")}
+                        title={t("dashboard.projectNameHint")}
+                        style={{ width: `${Math.max(projectNameText.length, t("dashboard.untitled").length) + 2}ch` }}
+                        onChange={(e) => setNameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") e.currentTarget.blur();
+                            else if (e.key === "Escape") {
+                                nameCancelledRef.current = true;
+                                e.currentTarget.blur();
+                            }
+                        }}
+                        onBlur={() => void commitName()}
+                    />
                 </div>
 
                 <div className="system-actions">
@@ -937,7 +1072,7 @@ function Dashboard() {
                                 type="number"
                                 step="1"
                                 min="0"
-                                placeholder="0"
+                                placeholder="1000"
                                 value={noiseText}
                                 onChange={(e) => setNoiseText(e.target.value)}
                             />
@@ -988,11 +1123,8 @@ function Dashboard() {
                     </div>
 
                     <div className="right-system-actions">
-                        <button onClick={() => void pick("replace")} disabled={stitching} title={t("dashboard.openImagesHint")}>
+                        <button onClick={() => void pick("replace")} disabled={stitching || exporting} title={t("dashboard.openImagesHint")}>
                             <img src={FolderOpen21px} alt={t("dashboard.openImages")} />
-                        </button>
-                        <button onClick={() => void pick("add")} disabled={stitching} title={t("dashboard.addImagesHint")}>
-                            <img src={ImagePlus21px} alt={t("dashboard.addImages")} />
                         </button>
                         {showStitchAgain && (
                             <button onClick={onStitchAgain} title={t("dashboard.stitchAgainHint")}>
@@ -1007,7 +1139,7 @@ function Dashboard() {
                         <button
                             className={confirmClear ? "confirm" : undefined}
                             onClick={() => void onClear()}
-                            disabled={stitching || (images.length === 0 && !panorama)}
+                            disabled={stitching || exporting || (images.length === 0 && !panorama)}
                             title={confirmClear ? t("dashboard.clearConfirmHint") : t("dashboard.clearAllHint")}
                         >
                             <img src={Trash21px} alt={t("dashboard.clearImages")} />
@@ -1089,9 +1221,61 @@ function Dashboard() {
                         />
                         <span className="slider-value">±{tolerance}</span>
                     </div>
-                    <button className="fit-button" onClick={fit} disabled={!current} title={t("dashboard.fitHint")}>
-                        <img src={Fit21px} alt={t("dashboard.fitToWindow")} />
-                    </button>
+                    <div className="download-menu" ref={downloadMenuRef}>
+                        {downloadOpen && (
+                            <div className="download-popover">
+                                {replacePrompt ? (
+                                    <div className="download-confirm">
+                                        <p>{t("dashboard.exportReplaceTitle")}</p>
+                                        <ul>
+                                            {replacePrompt.files.map((file) => (
+                                                <li key={file} title={file}>
+                                                    {file}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                        <div className="download-confirm-actions">
+                                            <button onClick={() => setReplacePrompt(null)}>{t("dashboard.exportCancel")}</button>
+                                            <button className="replace" onClick={() => void saveFiles(replacePrompt.kinds)}>
+                                                {t("dashboard.exportReplace")}
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        {downloadItems.map(({ kind, label, reason }) => (
+                                            <button
+                                                key={kind}
+                                                className="download-item"
+                                                disabled={reason !== null}
+                                                onClick={() => void startDownload([kind])}
+                                            >
+                                                {label}
+                                                {reason && <small>{reason}</small>}
+                                            </button>
+                                        ))}
+                                        <div className="download-divider" />
+                                        <button
+                                            className="download-item all"
+                                            disabled={downloadItems.some((item) => item.reason !== null)}
+                                            onClick={() => void startDownload(downloadItems.map((item) => item.kind))}
+                                        >
+                                            {t("dashboard.downloadAll")}
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        )}
+                        <button
+                            className={`download-button${downloadOpen ? " open" : ""}`}
+                            onClick={() => (downloadOpen ? closeDownload() : setDownloadOpen(true))}
+                            disabled={!current || stitching || exporting}
+                            title={t("dashboard.downloadHint")}
+                            aria-expanded={downloadOpen}
+                        >
+                            <img src={Download21px} alt={t("dashboard.download")} />
+                        </button>
+                    </div>
                 </div>
 
                 {/* outside the centred controls row, so the slider never moves while dragging */}

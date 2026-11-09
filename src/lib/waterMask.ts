@@ -397,6 +397,28 @@ export function buildOverlay(
 }
 
 /**
+ * Writes the selected water into out, one byte per pixel (1 = water): exactly the
+ * pixels counted by countSelectedPixels and filled by buildOverlay.
+ */
+export function buildMask(
+    labels: Int32Array,
+    areas: Int32Array,
+    noise: number,
+    deselected: ReadonlySet<LabelId>,
+    out: Uint8Array
+): void {
+    const selected = new Uint8Array(areas.length);
+    for (let l = 1; l < areas.length; l++) {
+        if (areas[l] >= noise && !deselected.has(l)) selected[l] = 1;
+    }
+    const n = Math.min(labels.length, out.length);
+    for (let i = 0; i < n; i++) {
+        const v = labels[i];
+        out[i] = selected[v < 0 ? -v : v];
+    }
+}
+
+/**
  * Water area in hectares.
  * sourceGsd = metres per full-resolution source-image pixel (the camera GSD);
  * panoScale = panorama pixels per source pixel (1 for a single raw image).

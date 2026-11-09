@@ -6,6 +6,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::export::{self, ExportKind, ExportRequest, ExportResult};
 use crate::project::{self, ProjectState};
 use crate::{data_dir, lock, project_state, stitch, AppState};
 
@@ -73,6 +74,12 @@ pub async fn pick_images(
             }
             let images = match mode {
                 PickMode::Replace => {
+                    // New photos are a new project, but a name typed before the first
+                    // photos were opened belongs to them.
+                    if !project::load_images(&dir).is_empty() {
+                        project::save_name(&dir, "")
+                            .map_err(|e| format!("Could not reset the project name: {e}"))?;
+                    }
                     project::delete_panorama(&dir)
                         .map_err(|e| format!("Could not remove the old panorama: {e}"))?;
                     project::dedupe_and_sort(picked)
@@ -106,10 +113,59 @@ pub async fn clear_project(app: AppHandle) -> Result<ProjectState, String> {
                 .map_err(|e| format!("Could not save the image list: {e}"))?;
             project::delete_panorama(&dir)
                 .map_err(|e| format!("Could not remove the panorama: {e}"))?;
+            project::save_name(&dir, "")
+                .map_err(|e| format!("Could not reset the project name: {e}"))?;
         }
         Ok(project_state(&app))
     })
     .await
+}
+
+/// Saves the project name; the returned state holds it as it will be used in file names.
+#[tauri::command]
+pub async fn set_project_name(app: AppHandle, name: String) -> Result<ProjectState, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let dir = data_dir(&app)?;
+        {
+            let _project = lock(&state.project_lock);
+            project::save_name(&dir, &project::sanitize_project_name(&name))
+                .map_err(|e| format!("Could not save the project name: {e}"))?;
+        }
+        Ok(project_state(&app))
+    })
+    .await
+}
+
+/// Names of the files an export would replace.
+#[tauri::command]
+pub async fn export_conflicts(
+    app: AppHandle,
+    kinds: Vec<ExportKind>,
+    fallback_name: String,
+) -> Result<Vec<String>, String> {
+    blocking(move || export::conflicts(&app, &kinds, &fallback_name)).await
+}
+
+/// Takes the water mask (one byte per panorama pixel) ahead of export_files, as raw
+/// bytes so it does not have to go through JSON.
+#[tauri::command]
+pub async fn stage_export_mask(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        // Tauri's postMessage IPC fallback delivers raw bytes as a JSON number array.
+        tauri::ipc::InvokeBody::Json(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("Unexpected water mask data: {e}"))?,
+    };
+    blocking(move || export::stage_mask(&app, &bytes)).await
+}
+
+#[tauri::command]
+pub async fn export_files(app: AppHandle, request: ExportRequest) -> Result<ExportResult, String> {
+    blocking(move || export::run(&app, &request)).await
 }
 
 #[tauri::command]

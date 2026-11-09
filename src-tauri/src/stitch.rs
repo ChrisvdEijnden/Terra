@@ -81,7 +81,7 @@ impl StitchState {
 
     /// Registers the spawned child so it can be cancelled. If a cancel already arrived,
     /// the child is killed right away.
-    fn attach(&self, child: Child) -> Arc<Mutex<Child>> {
+    pub(crate) fn attach(&self, child: Child) -> Arc<Mutex<Child>> {
         let child = Arc::new(Mutex::new(child));
         let mut slot = self.slot();
         if slot.cancelled {
@@ -143,7 +143,7 @@ pub fn wait_with_timeout(
     }
 }
 
-fn wait_shared(child: &Mutex<Child>) -> std::io::Result<ExitStatus> {
+pub(crate) fn wait_shared(child: &Mutex<Child>) -> std::io::Result<ExitStatus> {
     loop {
         if let Some(status) = lock(child).try_wait()? {
             return Ok(status);
@@ -154,7 +154,7 @@ fn wait_shared(child: &Mutex<Child>) -> std::io::Result<ExitStatus> {
 
 /// Reads `pipe` line by line (lossy UTF-8; `\r`-separated progress updates become
 /// separate lines) and calls `f` for every non-empty line until EOF.
-fn for_each_line<R: Read>(pipe: R, mut f: impl FnMut(&str)) {
+pub(crate) fn for_each_line<R: Read>(pipe: R, mut f: impl FnMut(&str)) {
     let mut reader = BufReader::new(pipe);
     let mut buf = Vec::new();
     loop {
@@ -236,7 +236,7 @@ pub fn describe_status(status: &ExitStatus) -> String {
     "exit status unknown".into()
 }
 
-fn cached_python(state: &AppState, log: &dyn Fn(&str)) -> Result<PathBuf, String> {
+pub(crate) fn cached_python(state: &AppState, log: &dyn Fn(&str)) -> Result<PathBuf, String> {
     let mut cache = lock(&state.python);
     if let Some(p) = cache.as_ref() {
         return Ok(p.clone());
@@ -261,16 +261,13 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
     Some((meta.modified().ok(), meta.len(), ino))
 }
 
-fn script_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn script_path(app: &AppHandle, resource: &str) -> Result<PathBuf, String> {
     let script = app
         .path()
-        .resolve(SCRIPT_RESOURCE, BaseDirectory::Resource)
-        .map_err(|e| format!("Could not locate the stitching script: {e}"))?;
+        .resolve(resource, BaseDirectory::Resource)
+        .map_err(|e| format!("Could not locate {resource}: {e}"))?;
     if !script.is_file() {
-        return Err(format!(
-            "The stitching script is missing ({})",
-            script.display()
-        ));
+        return Err(format!("{resource} is missing ({})", script.display()));
     }
     Ok(script)
 }
@@ -279,6 +276,9 @@ fn script_path(app: &AppHandle) -> Result<PathBuf, String> {
 pub fn run(app: &AppHandle, run_id: u64) -> Result<ProjectState, String> {
     let state = app.state::<AppState>();
     let guard = state.stitch.try_begin()?;
+    if state.export.is_running() {
+        return Err("Wait for the export to finish".into());
+    }
 
     let dir = crate::data_dir(app)?;
     let images = {
@@ -303,7 +303,7 @@ pub fn run(app: &AppHandle, run_id: u64) -> Result<ProjectState, String> {
         let _ = app.emit("stitch-log", StitchLog { run_id, line });
     };
     let python = cached_python(&state, &emit)?;
-    let script = script_path(app)?;
+    let script = script_path(app, SCRIPT_RESOURCE)?;
     if state.stitch.is_cancelled() {
         return Err(CANCELLED.into());
     }

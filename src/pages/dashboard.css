@@ -87,7 +87,7 @@
 }
 
 .noise input {
-    width: 45px;
+    width: 55px;
 }
 
 .gsd-estimate {
@@ -198,7 +198,11 @@
     opacity: 1;
 }
 
-.fit-button {
+.download-menu {
+    position: relative;
+}
+
+.download-button {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -209,16 +213,172 @@
     border: 1px solid var(--color-border);
     border-radius: 15px;
     cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-.fit-button img {
+.download-button img {
     width: 18px;
     height: 18px;
 }
 
-.fit-button:disabled {
+.download-button.open {
+    background-color: var(--color-brand-subtle-bg);
+    border-color: var(--color-brand);
+}
+
+.download-button:disabled {
     opacity: 0.4;
     cursor: default;
+}
+
+/* Opens upwards from the button, right edges aligned */
+.download-popover {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 260px;
+    padding: 6px;
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px var(--color-shadow);
+    font-family: "Figtree", sans-serif;
+}
+
+.download-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    width: 100%;
+    padding: 7px 10px;
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-primary);
+    text-align: left;
+    cursor: pointer;
+}
+
+.download-item:hover:not(:disabled) {
+    background-color: var(--color-brand-subtle-bg);
+}
+
+.download-item:disabled {
+    color: var(--color-text-tertiary);
+    cursor: default;
+}
+
+.download-item small {
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.download-item.all {
+    font-weight: 600;
+    color: var(--color-brand-accent);
+}
+
+.download-item.all:disabled {
+    color: var(--color-text-tertiary);
+}
+
+.download-divider {
+    height: 1px;
+    margin: 4px 6px;
+    background-color: var(--color-border);
+}
+
+.download-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 6px;
+}
+
+.download-confirm p {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.download-confirm ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+}
+
+.download-confirm li {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.download-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.download-confirm-actions button {
+    height: 28px;
+    padding: 0 12px;
+    background-color: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+}
+
+.download-confirm-actions button.replace {
+    background-color: var(--color-brand);
+    border-color: var(--color-brand);
+    color: var(--color-on-brand);
+}
+
+/* Project name breadcrumb: reads as text until it is hovered or edited */
+.project-name {
+    min-width: 0;
+    max-width: 200px;
+    height: 26px;
+    margin: 0 -6px;
+    padding: 0 6px;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    outline: none;
+    font-family: "Figtree", sans-serif;
+    font-size: 14px;
+    font-weight: normal;
+    color: var(--color-text-secondary);
+    text-overflow: ellipsis;
+}
+
+.project-name::placeholder {
+    color: var(--color-text-secondary);
+    opacity: 1;
+}
+
+.project-name:hover {
+    border-color: var(--color-border);
+}
+
+.project-name:focus {
+    border-color: var(--color-brand);
+    color: var(--color-text-primary);
 }
 
 /* Above the controls row (bottom 16 + height 30 + gap 8), out of its centred flow */

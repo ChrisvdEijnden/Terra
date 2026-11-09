@@ -16,9 +16,13 @@ export interface PanoramaInfo {
     estimatedGsd: number | null;
     /** Panorama pixels per full-resolution source-image pixel. */
     panoScale: number | null;
+    /** True when the panorama can be placed on a map. */
+    georeferenced: boolean;
 }
 
 export interface ProjectState {
+    /** Null until the user names the project. */
+    name: string | null;
     images: string[];
     panorama: PanoramaInfo | null;
     stitching: boolean;
@@ -57,6 +61,35 @@ export async function loadImageBytes(path: string): Promise<ArrayBuffer> {
 export function onStitchLog(handler: (payload: StitchLogPayload) => void): Promise<UnlistenFn> {
     return listen<StitchLogPayload>("stitch-log", (event) => handler(event.payload));
 }
+
+/** Saves the name; the returned state holds it as it will be used in file names. */
+export const setProjectName = (name: string): Promise<ProjectState> => invoke<ProjectState>("set_project_name", { name });
+
+export type ExportKind = "orthomosaic" | "polygon" | "area";
+
+export interface ExportRequest {
+    kinds: ExportKind[];
+    /** The name to use while the project has none. */
+    fallbackName: string;
+    areaHectares: number | null;
+    panoramaMtimeMs: number | null;
+}
+
+export interface ExportResult {
+    /** For display, for example Documents/Terra/Polder. */
+    folder: string;
+    files: string[];
+}
+
+/** Names of the files an export would replace. */
+export const exportConflicts = (kinds: ExportKind[], fallbackName: string): Promise<string[]> =>
+    invoke<string[]>("export_conflicts", { kinds, fallbackName });
+
+/** Hands over the water mask (one byte per panorama pixel) ahead of exportFiles. */
+export const stageExportMask = (mask: Uint8Array): Promise<void> => invoke<void>("stage_export_mask", mask);
+
+export const exportFiles = (request: ExportRequest): Promise<ExportResult> =>
+    invoke<ExportResult>("export_files", { request });
 
 export const STITCH_CANCELLED = "Stitching cancelled";
 

@@ -5,6 +5,7 @@
 //! - `stitch_input.json`  written by Rust right before running Python: `{"images": [...]}`
 //! - `panorama.png`       written by Python (atomically)
 //! - `result.json`        written by Python last, only on success
+//! - `project_name.txt`   written only by Rust; absent while the project has no name
 //!
 //! Everything here is plain std code so it can be unit tested without a Tauri app.
 
@@ -22,6 +23,13 @@ pub const PROJECT_FILE: &str = "project.json";
 pub const STITCH_INPUT_FILE: &str = "stitch_input.json";
 pub const PANORAMA_FILE: &str = "panorama.png";
 pub const RESULT_FILE: &str = "result.json";
+pub const PROJECT_NAME_FILE: &str = "project_name.txt";
+
+/// The name ends up in file and folder names, so it has to stay reasonably short.
+const MAX_NAME_CHARS: usize = 100;
+
+/// GDAL-style [lon0, dlon, 0, lat0, 0, dlat]: pixel-edge (col, row) to WGS84 degrees.
+pub type GeoTransform = [f64; 6];
 
 /// What the frontend gets for a stitched panorama.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -36,11 +44,17 @@ pub struct PanoramaInfo {
     pub gps_aligned: bool,
     pub estimated_gsd: Option<f64>,
     pub pano_scale: Option<f64>,
+    /// True when the panorama can be placed on a map.
+    pub georeferenced: bool,
+    #[serde(skip)]
+    pub geotransform: Option<GeoTransform>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectState {
+    /// None until the user names the project.
+    pub name: Option<String>,
     pub images: Vec<String>,
     pub panorama: Option<PanoramaInfo>,
     pub stitching: bool,
@@ -69,6 +83,9 @@ pub struct StitchResult {
     pub estimated_gsd: Option<f64>,
     #[serde(default)]
     pub pano_scale: Option<f64>,
+    /// Absent in result.json files written before map coordinates were added.
+    #[serde(default)]
+    pub geotransform: Option<GeoTransform>,
 }
 
 /// Keeps only finite, strictly positive numbers.
@@ -84,6 +101,9 @@ pub fn parse_result(text: &str) -> Option<StitchResult> {
     }
     r.estimated_gsd = positive(r.estimated_gsd);
     r.pano_scale = positive(r.pano_scale);
+    r.geotransform = r
+        .geotransform
+        .filter(|g| g.iter().all(|v| v.is_finite()) && g[1] != 0.0 && g[5] != 0.0);
     Some(r)
 }
 
@@ -123,6 +143,7 @@ pub fn load_panorama(dir: &Path) -> Option<PanoramaInfo> {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    let geotransform = if r.gps_aligned { r.geotransform } else { None };
     Some(PanoramaInfo {
         path: r.panorama,
         mtime_ms,
@@ -133,7 +154,47 @@ pub fn load_panorama(dir: &Path) -> Option<PanoramaInfo> {
         gps_aligned: r.gps_aligned,
         estimated_gsd: if r.gps_aligned { r.estimated_gsd } else { None },
         pano_scale: r.pano_scale,
+        georeferenced: geotransform.is_some(),
+        geotransform,
     })
+}
+
+/// Makes a typed project name safe to use as a folder and inside file names: no path
+/// separators or characters Finder and other systems reject, no hidden names, no "..".
+/// Empty means there is no usable name.
+pub fn sanitize_project_name(raw: &str) -> String {
+    let replaced: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"/\:*?"<>|"#.contains(c) {
+                '-'
+            } else {
+                c
+            }
+        })
+        .take(MAX_NAME_CHARS)
+        .collect();
+    replaced
+        .trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string()
+}
+
+pub fn load_name(dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(dir.join(PROJECT_NAME_FILE)).ok()?;
+    let name = sanitize_project_name(&text);
+    (!name.is_empty()).then_some(name)
+}
+
+/// Stores a sanitized project name; an empty name forgets the current one.
+pub fn save_name(dir: &Path, name: &str) -> io::Result<()> {
+    let path = dir.join(PROJECT_NAME_FILE);
+    if !name.is_empty() {
+        return write_atomic(&path, name.as_bytes());
+    }
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Forgets the current panorama (result.json first, so nothing points at a missing file).
@@ -439,6 +500,60 @@ mod tests {
     }
 
     #[test]
+    fn project_names_are_safe_for_the_file_system() {
+        assert_eq!(sanitize_project_name("  Polder Zuid  "), "Polder Zuid");
+        assert_eq!(sanitize_project_name("a/b\\c:d"), "a-b-c-d");
+        assert_eq!(sanitize_project_name("../../etc"), "-..-etc");
+        assert_eq!(sanitize_project_name("..."), "");
+        assert_eq!(sanitize_project_name(".hidden."), "hidden");
+        assert_eq!(sanitize_project_name("line\nbreak"), "line-break");
+        assert_eq!(sanitize_project_name("v1.2"), "v1.2");
+        assert_eq!(
+            sanitize_project_name(&"é".repeat(MAX_NAME_CHARS + 20))
+                .chars()
+                .count(),
+            MAX_NAME_CHARS
+        );
+    }
+
+    #[test]
+    fn project_name_roundtrip() {
+        let d = temp_dir("name");
+        assert_eq!(load_name(&d), None, "no file yet");
+        save_name(&d, "Polder").unwrap();
+        assert_eq!(load_name(&d), Some("Polder".to_string()));
+        save_name(&d, "").unwrap();
+        assert_eq!(load_name(&d), None, "an empty name forgets it");
+        save_name(&d, "").unwrap();
+        fs::write(d.join(PROJECT_NAME_FILE), "a/b").unwrap();
+        assert_eq!(
+            load_name(&d),
+            Some("a-b".to_string()),
+            "a hand-edited file cannot escape the folder"
+        );
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn geotransform_parsing() {
+        let parse = |g: &str| {
+            let text = format!(r#"{{"panorama": "/p.png", "width": 1, "height": 1, {g}}}"#);
+            parse_result(&text).unwrap().geotransform
+        };
+        assert_eq!(
+            parse(r#""geotransform": [5.3, 0.001, 0, 52.2, 0, -0.001]"#),
+            Some([5.3, 0.001, 0.0, 52.2, 0.0, -0.001])
+        );
+        assert_eq!(parse(r#""geotransform": null"#), None);
+        assert_eq!(parse(r#""gps_aligned": true"#), None, "older result.json");
+        assert_eq!(
+            parse(r#""geotransform": [5.3, 0, 0, 52.2, 0, -0.001]"#),
+            None,
+            "a zero pixel size cannot be a map"
+        );
+    }
+
+    #[test]
     fn result_json_parsing() {
         let full = r#"{"panorama": "/d/panorama.png", "images": ["/a", "/b"],
             "included_images": ["/a"], "width": 100, "height": 50, "gps_aligned": true,
@@ -505,7 +620,12 @@ mod tests {
         assert!(info.mtime_ms > 0);
         assert_eq!(info.pano_scale, Some(0.25));
         assert_eq!(info.estimated_gsd, None, "GSD only trusted on the GPS path");
+        assert!(!info.georeferenced);
         let json = serde_json::to_value(&info).unwrap();
+        assert!(
+            json.get("geotransform").is_none(),
+            "the transform stays in Rust"
+        );
         assert!(json.get("mtimeMs").is_some() && json.get("includedImages").is_some());
         assert!(json["estimatedGsd"].is_null());
 

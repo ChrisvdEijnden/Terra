@@ -1,4 +1,5 @@
 mod commands;
+mod export;
 mod project;
 mod python;
 mod stitch;
@@ -17,6 +18,8 @@ pub struct AppState {
     project_lock: Mutex<()>,
     /// The single stitch run (child process handle, cancel flag).
     stitch: stitch::StitchState,
+    /// The single export run (same one-child-at-a-time bookkeeping as the stitch).
+    export: stitch::StitchState,
     /// First interpreter that passed the import probe (successes only).
     python: Mutex<Option<PathBuf>>,
 }
@@ -42,6 +45,7 @@ pub(crate) fn project_state(app: &AppHandle) -> ProjectState {
     let stitching = app.state::<AppState>().stitch.is_running();
     match data_dir(app) {
         Ok(dir) => ProjectState {
+            name: project::load_name(&dir),
             images: project::load_images(&dir),
             panorama: project::load_panorama(&dir),
             stitching,
@@ -49,6 +53,7 @@ pub(crate) fn project_state(app: &AppHandle) -> ProjectState {
         Err(e) => {
             eprintln!("[terra] {e}");
             ProjectState {
+                name: None,
                 images: Vec::new(),
                 panorama: None,
                 stitching,
@@ -72,7 +77,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             // Closing the window must not leave Python running.
             if let WindowEvent::Destroyed = event {
-                window.state::<AppState>().stitch.kill_running();
+                let state = window.state::<AppState>();
+                state.stitch.kill_running();
+                state.export.kill_running();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -82,13 +89,19 @@ pub fn run() {
             commands::stitch_images,
             commands::cancel_stitch,
             commands::load_image,
+            commands::set_project_name,
+            commands::export_conflicts,
+            commands::stage_export_mask,
+            commands::export_files,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
     app.run(|app, event| {
         if let RunEvent::Exit = event {
-            app.state::<AppState>().stitch.kill_running();
+            let state = app.state::<AppState>();
+            state.stitch.kill_running();
+            state.export.kill_running();
         }
     });
 }
