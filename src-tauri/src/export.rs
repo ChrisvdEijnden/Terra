@@ -1,5 +1,6 @@
-//! Saving the results to Documents/Terra/<project name>: the orthomosaic (GeoTIFF), the
-//! water polygon (KMZ, both written by python/terra_export.py) and the area (text).
+//! Saving the results to Documents/Terra/<project name>: the thermal and the world
+//! orthomosaic (GeoTIFF), the water polygon (KMZ; these are written by
+//! python/terra_export.py) and the area (text).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Manager};
 
-use crate::project::{self, PanoramaInfo};
+use crate::project::{self, Kind, PanoramaInfo, Project, StitchTarget};
 use crate::stitch::{self, StderrSummary};
 use crate::{data_dir, lock, AppState};
 
@@ -24,7 +25,10 @@ const JOB_FILE: &str = "export-job.tmp";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportKind {
-    Orthomosaic,
+    /// The orthomosaic of the thermal photos.
+    Thermal,
+    /// The orthomosaic of the RGB photos.
+    World,
     Polygon,
     Area,
 }
@@ -50,7 +54,8 @@ pub struct ExportResult {
 
 pub fn file_name(kind: ExportKind, project: &str) -> String {
     match kind {
-        ExportKind::Orthomosaic => format!("orthomosaic_{project}-ir.tif"),
+        ExportKind::Thermal => format!("orthomosaic_{project}_T.tif"),
+        ExportKind::World => format!("orthomosaic_{project}_W.tif"),
         ExportKind::Polygon => format!("polygon_{project}.kmz"),
         ExportKind::Area => format!("hectare_{project}.txt"),
     }
@@ -113,6 +118,33 @@ fn current_panorama(dir: &Path, mtime_ms: Option<u64>) -> Result<PanoramaInfo, S
     Ok(panorama)
 }
 
+/// Which mosaic an orthomosaic is made from. The panorama is the thermal one when there
+/// are thermal photos and the RGB one otherwise; RGB photos that go with thermal ones
+/// have a mosaic of their own.
+fn orthomosaic_source(kind: ExportKind, photos: Kind) -> Result<StitchTarget, String> {
+    match (kind, photos) {
+        (ExportKind::Thermal, Kind::Thermal) | (ExportKind::World, Kind::World) => {
+            Ok(StitchTarget::Primary)
+        }
+        (ExportKind::World, Kind::Thermal) => Ok(StitchTarget::World),
+        (ExportKind::Thermal, Kind::World) => Err("This project has no thermal photos".into()),
+        (ExportKind::Polygon | ExportKind::Area, _) => Err("That is not an orthomosaic".into()),
+    }
+}
+
+/// The world mosaic, refusing one that was stitched from other photos.
+fn current_world_mosaic(dir: &Path, project: &Project) -> Result<PanoramaInfo, String> {
+    project::load_mosaic(dir, StitchTarget::World)
+        .filter(|world| project::same_set(&world.images, &project.world_images))
+        .ok_or_else(|| "The world orthomosaic is not stitched yet".to_string())
+}
+
+fn map_coordinates(mosaic: &PanoramaInfo) -> Result<project::GeoTransform, String> {
+    mosaic
+        .geotransform
+        .ok_or_else(|| "This panorama has no map coordinates".to_string())
+}
+
 /// Runs terra_export.py on `job` and waits for it.
 fn run_script(app: &AppHandle, dir: &Path, job: &Path) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -173,34 +205,54 @@ fn export(app: &AppHandle, dir: &Path, request: &ExportRequest) -> Result<Export
     let project = project_name(dir, &request.fallback_name);
     let folder = project_folder(app, &project)?;
     let path_of = |kind| folder.join(file_name(kind, &project));
-    let mapped = wants(ExportKind::Orthomosaic) || wants(ExportKind::Polygon);
+    let photos = project::load_project(dir);
 
     // Everything that can be refused is checked before anything is written.
     let area = wants(ExportKind::Area)
         .then(|| checked_area(request.area_hectares))
         .transpose()?;
-    let panorama = mapped
-        .then(|| current_panorama(dir, request.panorama_mtime_ms))
-        .transpose()?;
+    let mut panorama = None; // loaded once, and only when something is made from it
+    let mut measured_on = || match &panorama {
+        Some(loaded) => Ok::<PanoramaInfo, String>(PanoramaInfo::clone(loaded)),
+        None => {
+            let loaded = current_panorama(dir, request.panorama_mtime_ms)?;
+            panorama = Some(loaded.clone());
+            Ok(loaded)
+        }
+    };
+    let mut orthomosaics = Vec::new();
+    for kind in [ExportKind::Thermal, ExportKind::World] {
+        if !wants(kind) {
+            continue;
+        }
+        let mosaic = match orthomosaic_source(kind, photos.kind)? {
+            StitchTarget::Primary => measured_on()?,
+            StitchTarget::World => current_world_mosaic(dir, &photos)?,
+        };
+        orthomosaics.push(json!({
+            "panorama": mosaic.path,
+            "geotransform": map_coordinates(&mosaic)?,
+            "output": path_of(kind),
+        }));
+    }
+    let polygon = if wants(ExportKind::Polygon) {
+        let measured = measured_on()?;
+        Some(json!({
+            "mask": dir.join(MASK_FILE),
+            "width": measured.width,
+            "height": measured.height,
+            "geotransform": map_coordinates(&measured)?,
+            "output": path_of(ExportKind::Polygon),
+        }))
+    } else {
+        None
+    };
 
     fs::create_dir_all(&folder).map_err(|e| format!("the folder could not be created ({e})"))?;
 
-    if let Some(panorama) = panorama {
-        let geotransform = panorama
-            .geotransform
-            .ok_or_else(|| "This panorama has no map coordinates".to_string())?;
+    if !orthomosaics.is_empty() || polygon.is_some() {
         let job_path = dir.join(JOB_FILE);
-        let path_if = |kind| wants(kind).then(|| path_of(kind));
-        let job = json!({
-            "panorama": panorama.path,
-            "width": panorama.width,
-            "height": panorama.height,
-            "name": project,
-            "geotransform": geotransform,
-            "orthomosaic": path_if(ExportKind::Orthomosaic),
-            "polygon": path_if(ExportKind::Polygon),
-            "mask": wants(ExportKind::Polygon).then(|| dir.join(MASK_FILE)),
-        });
+        let job = json!({ "name": project, "orthomosaics": orthomosaics, "polygon": polygon });
         project::write_atomic(&job_path, job.to_string().as_bytes())
             .map_err(|e| format!("Could not write the export job: {e}"))?;
         run_script(app, dir, &job_path)?;
@@ -248,14 +300,38 @@ mod tests {
     #[test]
     fn file_names_follow_the_project_name() {
         assert_eq!(
-            file_name(ExportKind::Orthomosaic, "Polder"),
-            "orthomosaic_Polder-ir.tif"
+            file_name(ExportKind::Thermal, "Polder"),
+            "orthomosaic_Polder_T.tif"
+        );
+        assert_eq!(
+            file_name(ExportKind::World, "Polder"),
+            "orthomosaic_Polder_W.tif"
         );
         assert_eq!(
             file_name(ExportKind::Polygon, "Polder"),
             "polygon_Polder.kmz"
         );
         assert_eq!(file_name(ExportKind::Area, "Polder"), "hectare_Polder.txt");
+    }
+
+    #[test]
+    fn orthomosaics_come_from_the_right_mosaic() {
+        use ExportKind::{Polygon, Thermal, World};
+        assert_eq!(
+            orthomosaic_source(Thermal, Kind::Thermal),
+            Ok(StitchTarget::Primary)
+        );
+        assert_eq!(
+            orthomosaic_source(World, Kind::Thermal),
+            Ok(StitchTarget::World)
+        );
+        // RGB photos only: they are the panorama, and it is saved as the world one.
+        assert_eq!(
+            orthomosaic_source(World, Kind::World),
+            Ok(StitchTarget::Primary)
+        );
+        assert!(orthomosaic_source(Thermal, Kind::World).is_err());
+        assert!(orthomosaic_source(Polygon, Kind::Thermal).is_err());
     }
 
     #[test]

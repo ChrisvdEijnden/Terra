@@ -137,6 +137,68 @@
     pointer-events: auto;
 }
 
+/* Thermal / World switch: same pill as the other controls, the thumb marks the view */
+.view-toggle {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    height: 30px;
+    padding: 2px;
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 15px;
+}
+
+.view-toggle-option {
+    position: relative;
+    z-index: 1;
+    margin: 0;
+    padding: 0 12px;
+    background-color: transparent;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: "Figtree", sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.view-toggle-option[aria-checked="true"] {
+    color: var(--color-text-primary);
+}
+
+.view-toggle-option:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.view-toggle-option:focus-visible {
+    outline: 2px solid var(--color-brand-accent);
+    outline-offset: 1px;
+}
+
+.view-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    box-sizing: border-box;
+    background-color: var(--color-brand-subtle-bg);
+    border: 1px solid var(--color-brand);
+    border-radius: 999px;
+    transition: transform 0.2s ease;
+}
+
+.view-toggle[data-active="world"] .view-toggle-thumb {
+    transform: translateX(100%);
+}
+
 .color-picker {
     display: flex;
     background-color: var(--color-bg-surface);
@@ -288,6 +350,55 @@
 
 .download-item.all:disabled {
     color: var(--color-text-tertiary);
+}
+
+/* The same list under the Open button in the top bar: opens downwards */
+.open-menu {
+    position: relative;
+    display: flex;
+}
+
+.open-menu > button.open {
+    background-color: var(--color-bg-app);
+}
+
+.open-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 270px;
+    padding: 6px;
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px var(--color-shadow);
+    font-family: "Figtree", sans-serif;
+}
+
+/* stronger than the top bar's own button rules */
+.open-popover .download-item {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 1px;
+    min-width: 0;
+    height: auto;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-primary);
+}
+
+.open-popover .download-item small {
+    color: var(--color-text-secondary);
+}
+
+.open-popover .download-item:hover:not(:disabled) {
+    background-color: var(--color-brand-subtle-bg);
 }
 
 .download-divider {
@@ -546,6 +657,93 @@
 .empty-state button img {
     width: 18px;
     height: 18px;
+}
+
+.empty-state button.link {
+    height: auto;
+    padding: 2px 4px;
+    border: none;
+    background-color: transparent;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    text-decoration: underline;
+}
+
+.empty-state button.link:hover:not(:disabled) {
+    color: var(--color-text-primary);
+}
+
+/* Several flights in the opened folder: which one? */
+.flight-chooser {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -55%);
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-sizing: border-box;
+    width: 320px;
+    max-width: calc(100% - 32px);
+    max-height: calc(100% - 112px);
+    padding: 14px;
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    box-shadow: 0 8px 24px var(--color-shadow);
+    font-family: "Figtree", sans-serif;
+}
+
+.flight-chooser h3 {
+    margin: 0 4px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.flight-chooser p {
+    margin: 0 4px 4px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
+}
+
+.flight-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.flight-list .download-item {
+    flex-shrink: 0;
+}
+
+.flight-list .download-item small {
+    color: var(--color-text-secondary);
+}
+
+.flight-chooser .cancel {
+    align-self: flex-end;
+    height: 28px;
+    margin-top: 4px;
+    padding: 0 12px;
+    background-color: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+}
+
+.flight-chooser .cancel:hover {
+    border-color: var(--color-brand);
+    color: var(--color-text-primary);
 }
 
 /* Settings */

@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import "../styles/global.css";
 import "./dashboard.css";
@@ -14,14 +14,18 @@ import {
     getProject,
     loadImageBytes,
     onStitchLog,
+    openFlight,
+    pickFolder,
     pickImages,
     setProjectName,
     stageExportMask,
     stitchImages,
     STITCH_CANCELLED,
     type ExportKind,
-    type PickMode,
+    type FlightSummary,
+    type PanoramaInfo,
     type ProjectState,
+    type StitchTarget,
 } from "../lib/api.ts";
 import {
     areaHectares,
@@ -78,6 +82,21 @@ interface DisplaySource {
     isPanorama: boolean;
 }
 
+interface FlightChoice {
+    scanId: number;
+    folder: string;
+    flights: FlightSummary[];
+}
+
+interface DownloadItem {
+    kind: ExportKind;
+    label: string;
+    /** Why it cannot be saved now, or null when it can. */
+    reason: string | null;
+    /** Something to know before saving it. */
+    note?: string;
+}
+
 interface LoadedImage {
     key: string;
     width: number;
@@ -112,11 +131,49 @@ function isPanoramaStale(state: ProjectState): boolean {
     return !!state.panorama && !sameSet(state.panorama.images, state.images);
 }
 
+function mosaicOf(state: ProjectState | null, target: StitchTarget): PanoramaInfo | null {
+    return (target === "world" ? state?.worldPanorama : state?.panorama) ?? null;
+}
+
+/** The world mosaic as it can be saved: stitched from the current world photos. */
+function worldMosaic(state: ProjectState | null): PanoramaInfo | null {
+    const world = state?.worldPanorama;
+    return world && sameSet(world.images, state.worldImages) ? world : null;
+}
+
+/** Closes an open menu on a press outside it and on Escape. */
+function useDismiss(
+    open: boolean,
+    menuRef: RefObject<HTMLElement | null>,
+    canvasRef: RefObject<HTMLCanvasElement | null>,
+    close: () => void
+) {
+    useEffect(() => {
+        if (!open) return;
+        const onPointerDown = (e: PointerEvent) => {
+            if (menuRef.current?.contains(e.target as Node)) return;
+            close();
+            // this press only closes the menu; it must not also select water
+            if (e.target === canvasRef.current) e.stopPropagation();
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") close();
+        };
+        window.addEventListener("pointerdown", onPointerDown, true);
+        window.addEventListener("keydown", onKey);
+        return () => {
+            window.removeEventListener("pointerdown", onPointerDown, true);
+            window.removeEventListener("keydown", onKey);
+        };
+    }, [open, menuRef, canvasRef, close]);
+}
+
 function mimeFor(path: string): string {
     const ext = path.split(".").pop()?.toLowerCase();
     if (ext === "png") return "image/png";
     if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
     if (ext === "tif" || ext === "tiff") return "image/tiff";
+    if (ext === "webp") return "image/webp";
     return "";
 }
 
@@ -162,6 +219,8 @@ function Dashboard() {
     const imageUrlRef = useRef<string | null>(null);
     const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const overlayDataRef = useRef<ImageData | null>(null);
+    /** The world mosaic on the frame of the panorama, once it has been looked at. */
+    const worldImageRef = useRef<{ key: string; image: HTMLImageElement; url: string } | null>(null);
     const viewRef = useRef<View>({ scale: 1, offsetX: 0, offsetY: 0 });
     const viewportRef = useRef<Size>({ width: 0, height: 0 });
     const paddingRef = useRef<Padding>(DEFAULT_PADDING);
@@ -207,6 +266,17 @@ function Dashboard() {
     const [exporting, setExporting] = useState(false);
     const downloadMenuRef = useRef<HTMLDivElement | null>(null);
 
+    // ---- opening photos
+    const [openMenu, setOpenMenu] = useState(false);
+    const openMenuRef = useRef<HTMLDivElement | null>(null);
+    const [flightChoice, setFlightChoice] = useState<FlightChoice | null>(null);
+
+    // ---- world view (the RGB mosaic in place of the thermal panorama)
+    const [worldOn, setWorldOn] = useState(false);
+    const worldOnRef = useRef(worldOn);
+    worldOnRef.current = worldOn;
+    const [worldLoading, setWorldLoading] = useState(false);
+
     const segmentation = mask.segmentation;
     const deselected = segmentation && deselection.segId === segmentation.jobId ? deselection.labels : EMPTY_SET;
 
@@ -214,6 +284,15 @@ function Dashboard() {
     const images = project?.images ?? [];
     const panorama = project?.panorama ?? null;
     const stale = !!project && isPanoramaStale(project);
+    const thermalProject = project?.kind === "thermal";
+    /** Thermal photos with RGB photos next to them: there is a world view to switch to. */
+    const hasWorld = thermalProject && (project?.worldImages.length ?? 0) >= 2;
+    const worldView = hasWorld ? (project?.worldView ?? null) : null;
+    /** The world mosaic is stitched from the current photos but has no map coordinates:
+     *  stitching it again would end the same way. */
+    const worldOffMap = hasWorld && !worldView && worldMosaic(project)?.georeferenced === false;
+    const worldKey = worldView ? `${worldView.path}|${worldView.mtimeMs}` : null;
+    const worldPath = worldView?.path ?? null;
 
     const includedCount = useMemo(() => {
         if (!panorama) return 0;
@@ -269,21 +348,23 @@ function Dashboard() {
     // A stitch this page did not start (reload / back from Settings): show that it is running,
     // and when it ends without a new panorama say so (its error went to the old page).
     const prevBackendStitchingRef = useRef(false);
-    const earlierPanoMtimeRef = useRef<number | null>(null);
+    const earlierStitchRef = useRef<{ target: StitchTarget; mtimeMs: number | null }>({ target: "primary", mtimeMs: null });
     useEffect(() => {
-        const backendStitching = !!project?.stitching;
+        const target = project?.stitching ?? null;
+        const backendStitching = target !== null;
         const was = prevBackendStitchingRef.current;
         prevBackendStitchingRef.current = backendStitching;
         if (localStitching || activeRunRef.current !== null) return;
-        if (backendStitching) {
-            if (!was) earlierPanoMtimeRef.current = project?.panorama?.mtimeMs ?? null;
+        if (target !== null) {
+            if (!was) earlierStitchRef.current = { target, mtimeMs: mosaicOf(project, target)?.mtimeMs ?? null };
             setStatus((s) => s ?? { kind: "progress", text: t("dashboard.earlierStitch") });
         } else if (was) {
-            const pano = project?.panorama ?? null;
-            const finished = !!pano && pano.mtimeMs !== earlierPanoMtimeRef.current;
-            setStatus((s) =>
-                s?.kind === "progress" ? (finished ? null : { kind: "warning", text: t("dashboard.earlierStitchFailed") }) : s
-            );
+            const earlier = earlierStitchRef.current;
+            const pano = mosaicOf(project, earlier.target);
+            const finished = !!pano && pano.mtimeMs !== earlier.mtimeMs;
+            // the world mosaic is started again from the World switch, not from Stitch again
+            const failed = earlier.target === "world" ? "dashboard.earlierWorldStitchFailed" : "dashboard.earlierStitchFailed";
+            setStatus((s) => (s?.kind === "progress" ? (finished ? null : { kind: "warning", text: t(failed) }) : s));
         }
     }, [project, localStitching, t]);
 
@@ -322,48 +403,86 @@ function Dashboard() {
         if (confirmTimerRef.current !== null) window.clearTimeout(confirmTimerRef.current);
     }, []);
 
-    const runStitch = useCallback(async () => {
-        if (activeRunRef.current !== null) return;
-        const runId = Date.now();
-        activeRunRef.current = runId;
-        setLocalStitching(true);
-        setStatus({ kind: "progress", text: t("dashboard.startingStitcher") });
-        const seq = ++stateSeqRef.current;
-        try {
-            const state = await stitchImages(runId);
-            activeRunRef.current = null; // drop late log lines
-            applyProject(seq, state);
-            setStatus((s) => (s?.kind === "progress" ? null : s));
-        } catch (err) {
-            activeRunRef.current = null;
-            const msg = errorMessage(err);
-            if (msg === STITCH_CANCELLED) setStatus({ kind: "info", text: t("dashboard.stitchCancelled") });
-            else setStatus({ kind: "error", text: /^stitching/i.test(msg) ? msg : t("dashboard.stitchFailed", { error: msg }) });
-            void refreshProject();
-        } finally {
-            setLocalStitching(false);
-        }
-    }, [applyProject, refreshProject, t]);
+    /** Resolves to the new project state, or null when the stitch did not produce one. */
+    const runStitch = useCallback(
+        async (target: StitchTarget = "primary"): Promise<ProjectState | null> => {
+            if (activeRunRef.current !== null) return null;
+            const runId = Date.now();
+            activeRunRef.current = runId;
+            setLocalStitching(true);
+            setStatus({ kind: "progress", text: t("dashboard.startingStitcher") });
+            const seq = ++stateSeqRef.current;
+            try {
+                const state = await stitchImages(runId, target);
+                activeRunRef.current = null; // drop late log lines
+                // another request (a rename, say) answered meanwhile, with older news
+                if (!applyProject(seq, state)) void refreshProject();
+                setStatus((s) => (s?.kind === "progress" ? null : s));
+                return state;
+            } catch (err) {
+                activeRunRef.current = null;
+                const msg = errorMessage(err);
+                if (msg === STITCH_CANCELLED) setStatus({ kind: "info", text: t("dashboard.stitchCancelled") });
+                else setStatus({ kind: "error", text: /^stitching/i.test(msg) ? msg : t("dashboard.stitchFailed", { error: msg }) });
+                void refreshProject();
+                return null;
+            } finally {
+                setLocalStitching(false);
+            }
+        },
+        [applyProject, refreshProject, t]
+    );
 
-    const pick = useCallback(
-        async (mode: PickMode) => {
+    /** New photos were opened: start measuring afresh and stitch them. */
+    const startProject = useCallback(
+        (state: ProjectState) => {
+            resetGsd();
+            setWorldOn(false);
+            const upToDate = !!state.panorama && !isPanoramaStale(state);
+            if (state.images.length >= 2 && !upToDate && !state.stitching) void runStitch();
+        },
+        [resetGsd, runStitch]
+    );
+
+    /** Runs one way of opening photos; `open` resolves to null when nothing was opened. */
+    const openWith = useCallback(
+        async (open: () => Promise<ProjectState | null>) => {
+            setOpenMenu(false);
             cancelClearConfirm();
             clearStatus();
             const seq = ++stateSeqRef.current;
             let state: ProjectState | null;
             try {
-                state = await pickImages(mode);
+                state = await open();
             } catch (err) {
                 if (seq === stateSeqRef.current) showError(errorMessage(err));
                 return;
             }
-            if (state === null) return; // dialog cancelled
-            if (!applyProject(seq, state)) return;
-            if (mode === "replace") resetGsd();
-            const upToDate = !!state.panorama && !isPanoramaStale(state);
-            if (state.images.length >= 2 && !upToDate && !state.stitching) void runStitch();
+            if (state !== null && applyProject(seq, state)) startProject(state);
         },
-        [applyProject, cancelClearConfirm, clearStatus, resetGsd, runStitch, showError]
+        [applyProject, cancelClearConfirm, clearStatus, showError, startProject]
+    );
+
+    const openPhotos = useCallback(() => openWith(() => pickImages("replace")), [openWith]);
+
+    const openFolder = useCallback(
+        () =>
+            openWith(async () => {
+                const picked = await pickFolder();
+                if (picked.outcome === "opened") return picked.state;
+                // several flights in the folder: the user says which one
+                setFlightChoice(picked.outcome === "chooseFlight" ? picked : null);
+                return null;
+            }),
+        [openWith]
+    );
+
+    const chooseFlight = useCallback(
+        (choice: FlightChoice, index: number) => {
+            setFlightChoice(null);
+            return openWith(() => openFlight(choice.scanId, index));
+        },
+        [openWith]
     );
 
     const onStitchAgain = useCallback(() => {
@@ -402,7 +521,10 @@ function Dashboard() {
         const seq = ++stateSeqRef.current;
         try {
             const state = await clearProject();
-            if (applyProject(seq, state)) resetGsd();
+            if (applyProject(seq, state)) {
+                resetGsd();
+                setWorldOn(false);
+            }
         } catch (err) {
             if (seq === stateSeqRef.current) showError(errorMessage(err));
         }
@@ -435,9 +557,14 @@ function Dashboard() {
         const v = viewRef.current;
         const w = image.naturalWidth * v.scale;
         const h = image.naturalHeight * v.scale;
+        // The world mosaic covers the same piece of ground as the panorama, so it is drawn
+        // in its place and everything else (the view, the mask, clicks) stays as it is.
+        const world = worldOnRef.current ? worldImageRef.current?.image : null;
+        const shown = world ?? image;
         // crisp pixels when zoomed in, smooth when zoomed out
+        ctx.imageSmoothingEnabled = (w / shown.naturalWidth) * dpr < 2;
+        ctx.drawImage(shown, v.offsetX, v.offsetY, w, h);
         ctx.imageSmoothingEnabled = v.scale * dpr < 2;
-        ctx.drawImage(image, v.offsetX, v.offsetY, w, h);
 
         const overlay = overlayCanvasRef.current;
         if (overlay && overlay.width === image.naturalWidth && overlay.height === image.naturalHeight) {
@@ -602,12 +729,77 @@ function Dashboard() {
         };
     }, [displayKey, displayPath, clearImage, sendPixelsToWorker, requestDraw]);
 
-    // Revoke the object URL when leaving the page.
+    // Revoke the object URLs when leaving the page.
     useEffect(() => () => {
         if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
         imageUrlRef.current = null;
         imageRef.current = null;
+        if (worldImageRef.current) URL.revokeObjectURL(worldImageRef.current.url);
+        worldImageRef.current = null;
     }, []);
+
+    // ---- world view: loaded the first time it is looked at, kept while it stays the same
+    useEffect(() => {
+        const held = worldImageRef.current;
+        if (held && held.key !== worldKey) {
+            // the mosaic it showed was replaced or removed
+            URL.revokeObjectURL(held.url);
+            worldImageRef.current = null;
+        }
+        requestDraw();
+        if (!worldOn || !worldKey || !worldPath || worldImageRef.current) return;
+
+        let cancelled = false;
+        setWorldLoading(true);
+        (async () => {
+            let url: string | null = null;
+            try {
+                const bytes = await loadImageBytes(worldPath);
+                if (cancelled) return;
+                url = URL.createObjectURL(new Blob([bytes], { type: mimeFor(worldPath) }));
+                const image = new Image();
+                image.decoding = "async";
+                image.src = url;
+                try {
+                    await image.decode();
+                } catch {
+                    throw new Error(tRef.current("dashboard.decodeFailed"));
+                }
+                if (cancelled) return;
+                worldImageRef.current = { key: worldKey, image, url };
+                url = null;
+                requestDraw();
+            } catch (err) {
+                if (cancelled) return;
+                setWorldOn(false);
+                setStatus({ kind: "error", text: tRef.current("dashboard.worldOpenFailed", { error: errorMessage(err) }) });
+            } finally {
+                if (url) URL.revokeObjectURL(url); // created but not used
+                if (!cancelled) setWorldLoading(false);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+            setWorldLoading(false);
+        };
+    }, [worldOn, worldKey, worldPath, requestDraw]);
+
+    // The world view with no world mosaic to show (its stitch failed or was cancelled, or
+    // the panorama was stitched again): back to the thermal view.
+    useEffect(() => {
+        if (worldOn && !worldKey && !stitching) setWorldOn(false);
+    }, [worldOn, worldKey, stitching]);
+
+    const showWorld = async () => {
+        setWorldOn(true);
+        const state = worldView ? project : await runStitch("world");
+        if (!state) return; // runStitch reports its own failure or cancellation
+        // stitched, but it cannot be laid over the panorama
+        if (!state.worldView) setStatus({ kind: "warning", text: t("dashboard.worldNoView") });
+        else if (state.worldPanorama && !state.worldPanorama.aligned)
+            setStatus({ kind: "warning", text: t("dashboard.worldNotAligned") });
+    };
 
     // ---- segmentation (in the worker, latest wins)
     const { requestSegmentation } = mask;
@@ -737,42 +929,38 @@ function Dashboard() {
         setDownloadOpen(false);
         setReplacePrompt(null);
     }, []);
+    useDismiss(downloadOpen, downloadMenuRef, canvasRef, closeDownload);
 
-    useEffect(() => {
-        if (!downloadOpen) return;
-        const onPointerDown = (e: PointerEvent) => {
-            if (downloadMenuRef.current?.contains(e.target as Node)) return;
-            closeDownload();
-            // this press only closes the menu; it must not also select water
-            if (e.target === canvasRef.current) e.stopPropagation();
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") closeDownload();
-        };
-        window.addEventListener("pointerdown", onPointerDown, true);
-        window.addEventListener("keydown", onKey);
-        return () => {
-            window.removeEventListener("pointerdown", onPointerDown, true);
-            window.removeEventListener("keydown", onKey);
-        };
-    }, [downloadOpen, closeDownload]);
+    const closeOpenMenu = useCallback(() => setOpenMenu(false), []);
+    useDismiss(openMenu, openMenuRef, canvasRef, closeOpenMenu);
+
+    // The world mosaic of a thermal project is stitched when it is first asked for.
+    const worldToStitch = hasWorld && !worldMosaic(project);
+    // What is saved is what is selected when the files are written, which can be minutes
+    // after the click when the world mosaic has to be stitched first.
+    const measuredRef = useRef({ segmentation, noise, deselected, area, panoramaMtimeMs: panorama?.mtimeMs ?? null });
+    measuredRef.current = { segmentation, noise, deselected, area, panoramaMtimeMs: panorama?.mtimeMs ?? null };
 
     const saveFiles = async (kinds: ExportKind[]) => {
         closeDownload();
+        // runStitch reports its own failure or cancellation
+        if (kinds.includes("world") && worldToStitch && !(await runStitch("world"))) return;
         setExporting(true);
         setStatus({ kind: "progress", text: t("dashboard.exportSaving") });
         try {
+            const measured = measuredRef.current;
             if (kinds.includes("polygon")) {
-                if (!segmentation) throw new Error(t("dashboard.exportNeedsWater"));
-                const waterMask = new Uint8Array(segmentation.width * segmentation.height);
-                buildMask(segmentation.labels, segmentation.areas, noise, deselected, waterMask);
+                if (!measured.segmentation) throw new Error(t("dashboard.exportNeedsWater"));
+                const { labels, areas, width, height } = measured.segmentation;
+                const waterMask = new Uint8Array(width * height);
+                buildMask(labels, areas, measured.noise, measured.deselected, waterMask);
                 await stageExportMask(waterMask);
             }
             const result = await exportFiles({
                 kinds,
                 fallbackName: t("dashboard.untitled"),
-                areaHectares: area,
-                panoramaMtimeMs: panorama?.mtimeMs ?? null,
+                areaHectares: measured.area,
+                panoramaMtimeMs: measured.panoramaMtimeMs,
             });
             setStatus({ kind: "info", text: t("dashboard.exportSaved", { folder: result.folder }) });
         } catch (err) {
@@ -801,8 +989,19 @@ function Dashboard() {
               ? t("dashboard.exportNeedsStitch")
               : t("dashboard.exportNoGps");
     const waterReason = analysisReady && pixelCount !== null && pixelCount > 0 ? null : t("dashboard.exportNeedsWater");
-    const downloadItems: { kind: ExportKind; label: string; reason: string | null }[] = [
-        { kind: "orthomosaic", label: t("dashboard.downloadOrthomosaic"), reason: mapReason },
+    const downloadItems: DownloadItem[] = [
+        ...(thermalProject ? [{ kind: "thermal" as const, label: t("dashboard.downloadThermal"), reason: mapReason }] : []),
+        // without thermal photos the RGB panorama is the world orthomosaic
+        ...(hasWorld || !thermalProject
+            ? [
+                  {
+                      kind: "world" as const,
+                      label: t("dashboard.downloadWorld"),
+                      reason: mapReason ?? (worldOffMap ? t("dashboard.worldNoView") : null),
+                      note: worldToStitch ? t("dashboard.worldStitchFirst") : undefined,
+                  },
+              ]
+            : []),
         { kind: "polygon", label: t("dashboard.downloadPolygon"), reason: mapReason ?? waterReason },
         {
             kind: "area",
@@ -989,7 +1188,9 @@ function Dashboard() {
 
     const busyText = imageLoading
         ? t("dashboard.loadingImage")
-        : mask.analysing
+        : worldLoading
+          ? t("dashboard.loadingWorld")
+          : mask.analysing
           ? t("dashboard.analysingImage")
           : mask.segmenting
             ? t("dashboard.findingWater")
@@ -1123,9 +1324,29 @@ function Dashboard() {
                     </div>
 
                     <div className="right-system-actions">
-                        <button onClick={() => void pick("replace")} disabled={stitching || exporting} title={t("dashboard.openImagesHint")}>
-                            <img src={FolderOpen21px} alt={t("dashboard.openImages")} />
-                        </button>
+                        <div className="open-menu" ref={openMenuRef}>
+                            <button
+                                className={openMenu ? "open" : undefined}
+                                onClick={() => setOpenMenu((open) => !open)}
+                                disabled={stitching || exporting}
+                                title={t("dashboard.openImagesHint")}
+                                aria-expanded={openMenu}
+                            >
+                                <img src={FolderOpen21px} alt={t("dashboard.openImages")} />
+                            </button>
+                            {openMenu && (
+                                <div className="open-popover">
+                                    <button className="download-item" onClick={() => void openFolder()}>
+                                        {t("dashboard.openFolder")}
+                                        <small>{t("dashboard.openFolderHint")}</small>
+                                    </button>
+                                    <button className="download-item" onClick={() => void openPhotos()}>
+                                        {t("dashboard.choosePhotos")}
+                                        <small>{t("dashboard.choosePhotosHint")}</small>
+                                    </button>
+                                </div>
+                            )}
+                        </div>
                         {showStitchAgain && (
                             <button onClick={onStitchAgain} title={t("dashboard.stitchAgainHint")}>
                                 <img src={StitchAgain21px} alt={t("dashboard.stitchAgain")} />
@@ -1165,13 +1386,45 @@ function Dashboard() {
                     style={{ cursor: canvasCursor }}
                 />
 
-                {!displaySource && (
+                {!displaySource && !flightChoice && (
                     <div className="empty-state">
                         <h3>{t("dashboard.noImagesTitle")}</h3>
                         <p>{t("dashboard.noImagesText")}</p>
-                        <button onClick={() => void pick("replace")} disabled={stitching}>
+                        <button onClick={() => void openFolder()} disabled={stitching}>
                             <img src={FolderOpen21px} alt="" />
-                            {t("dashboard.openImages")}
+                            {t("dashboard.openFolder")}
+                        </button>
+                        <button className="link" onClick={() => void openPhotos()} disabled={stitching}>
+                            {t("dashboard.choosePhotos")}
+                        </button>
+                    </div>
+                )}
+
+                {flightChoice && (
+                    <div className="flight-chooser" role="dialog" aria-label={t("dashboard.chooseFlightTitle")}>
+                        <h3>{t("dashboard.chooseFlightTitle")}</h3>
+                        <p>{t("dashboard.chooseFlightText", { folder: flightChoice.folder, count: flightChoice.flights.length })}</p>
+                        <div className="flight-list">
+                            {flightChoice.flights.map((flight, index) => (
+                                <button
+                                    key={flight.label}
+                                    className="download-item"
+                                    onClick={() => void chooseFlight(flightChoice, index)}
+                                >
+                                    {flight.label}
+                                    <small>
+                                        {[
+                                            flight.thermal > 0 ? t("dashboard.flightThermal", { count: flight.thermal }) : null,
+                                            flight.world > 0 ? t("dashboard.flightWorld", { count: flight.world }) : null,
+                                        ]
+                                            .filter(Boolean)
+                                            .join(" · ")}
+                                    </small>
+                                </button>
+                            ))}
+                        </div>
+                        <button className="cancel" onClick={() => setFlightChoice(null)}>
+                            {t("dashboard.exportCancel")}
                         </button>
                     </div>
                 )}
@@ -1198,6 +1451,50 @@ function Dashboard() {
                 )}
 
                 <div className="controls">
+                    {hasWorld && (
+                        <div
+                            className="view-toggle"
+                            role="radiogroup"
+                            aria-label={t("dashboard.viewToggle")}
+                            data-active={worldOn ? "world" : "thermal"}
+                        >
+                            <button
+                                type="button"
+                                className="view-toggle-option"
+                                role="radio"
+                                aria-checked={!worldOn}
+                                onClick={() => setWorldOn(false)}
+                            >
+                                {t("dashboard.viewThermal")}
+                            </button>
+                            <button
+                                type="button"
+                                className="view-toggle-option"
+                                role="radio"
+                                aria-checked={worldOn}
+                                disabled={
+                                    !showingPanorama ||
+                                    !current ||
+                                    !panorama!.georeferenced ||
+                                    worldOffMap ||
+                                    (!worldView && (stitching || exporting))
+                                }
+                                title={
+                                    worldView
+                                        ? undefined
+                                        : showingPanorama && !panorama!.georeferenced
+                                          ? t("dashboard.worldNeedsMap")
+                                          : worldOffMap
+                                            ? t("dashboard.worldNoView")
+                                            : t("dashboard.worldStitchFirst")
+                                }
+                                onClick={() => void showWorld()}
+                            >
+                                {t("dashboard.viewWorld")}
+                            </button>
+                            <span className="view-toggle-thumb" aria-hidden="true"></span>
+                        </div>
+                    )}
                     <div
                         className={`color-picker${picking ? " active" : ""}`}
                         id="color-picker"
@@ -1243,7 +1540,7 @@ function Dashboard() {
                                     </div>
                                 ) : (
                                     <>
-                                        {downloadItems.map(({ kind, label, reason }) => (
+                                        {downloadItems.map(({ kind, label, reason, note }) => (
                                             <button
                                                 key={kind}
                                                 className="download-item"
@@ -1251,7 +1548,7 @@ function Dashboard() {
                                                 onClick={() => void startDownload([kind])}
                                             >
                                                 {label}
-                                                {reason && <small>{reason}</small>}
+                                                {(reason ?? note) && <small>{reason ?? note}</small>}
                                             </button>
                                         ))}
                                         <div className="download-divider" />

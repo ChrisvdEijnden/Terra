@@ -1,23 +1,82 @@
 //! Tauri commands called from the frontend.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::export::{self, ExportKind, ExportRequest, ExportResult};
-use crate::project::{self, ProjectState};
+use crate::project::{self, Kind, Project, ProjectState, StitchTarget};
+use crate::scan::{self, Flight, FlightSummary, IMAGE_EXTENSIONS};
 use crate::{data_dir, lock, project_state, stitch, AppState};
 
 const BUSY: &str = "Wait for the current stitch to finish";
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff"];
+const EXPORTING: &str = "Wait for the export to finish";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PickMode {
     Replace,
     Add,
+}
+
+/// The flights found in the folder that was picked last, until one of them is opened.
+pub struct PendingFlights {
+    id: u64,
+    flights: Vec<Flight>,
+}
+
+/// What picking a folder led to.
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum OpenOutcome {
+    Cancelled,
+    Opened {
+        state: Box<ProjectState>,
+    },
+    /// The folder holds several flights: open_flight opens the chosen one.
+    ChooseFlight {
+        scan_id: u64,
+        folder: String,
+        flights: Vec<FlightSummary>,
+    },
+}
+
+/// Makes `project` the current one. `name` is the folder the photos came from.
+fn open_project(app: &AppHandle, project: &Project, name: Option<&str>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let dir = data_dir(app)?;
+    let _project = lock(&state.project_lock);
+    if state.stitch.is_running() {
+        return Err(BUSY.into());
+    }
+    if state.export.is_running() {
+        return Err(EXPORTING.into());
+    }
+    // The folder names the project, except that a name typed before the first photos
+    // were opened belongs to them.
+    let typed_ahead =
+        project::load_project(&dir).images.is_empty() && project::load_name(&dir).is_some();
+    if !typed_ahead {
+        let name = project::sanitize_project_name(name.unwrap_or_default());
+        project::save_name(&dir, &name)
+            .map_err(|e| format!("Could not set the project name: {e}"))?;
+    }
+    project::delete_panorama(&dir)
+        .map_err(|e| format!("Could not remove the old panorama: {e}"))?;
+    project::save_project(&dir, project).map_err(|e| format!("Could not save the image list: {e}"))
+}
+
+fn open_flight_now(app: &AppHandle, flight: Flight) -> Result<ProjectState, String> {
+    let name = flight.name.clone();
+    open_project(app, &flight.into_project(), Some(&name))?;
+    Ok(project_state(app))
 }
 
 /// Runs `f` on a blocking thread so the main (UI) thread never waits on I/O.
@@ -65,36 +124,103 @@ pub async fn pick_images(
             return Ok(None);
         }
 
-        let state = app.state::<AppState>();
-        let dir = data_dir(&app)?;
-        {
-            let _project = lock(&state.project_lock);
-            if state.stitch.is_running() {
-                return Err(BUSY.into());
+        let (thermal, world) = scan::sort_photos(picked);
+        match mode {
+            PickMode::Replace => {
+                let project = Project::new(
+                    project::dedupe_and_sort(thermal),
+                    project::dedupe_and_sort(world),
+                );
+                let name = scan::name_for_photos(&project.images);
+                open_project(&app, &project, name.as_deref())?;
             }
-            let images = match mode {
-                PickMode::Replace => {
-                    // New photos are a new project, but a name typed before the first
-                    // photos were opened belongs to them.
-                    if !project::load_images(&dir).is_empty() {
-                        project::save_name(&dir, "")
-                            .map_err(|e| format!("Could not reset the project name: {e}"))?;
-                    }
-                    project::delete_panorama(&dir)
-                        .map_err(|e| format!("Could not remove the old panorama: {e}"))?;
-                    project::dedupe_and_sort(picked)
+            PickMode::Add => {
+                let state = app.state::<AppState>();
+                let dir = data_dir(&app)?;
+                let _project = lock(&state.project_lock);
+                if state.stitch.is_running() {
+                    return Err(BUSY.into());
                 }
-                PickMode::Add => project::dedupe_and_sort(
-                    project::load_images(&dir)
-                        .into_iter()
-                        .map(PathBuf::from)
-                        .chain(picked),
-                ),
-            };
-            project::save_images(&dir, &images)
-                .map_err(|e| format!("Could not save the image list: {e}"))?;
+                let current = project::load_project(&dir);
+                let (had_thermal, had_world) = match current.kind {
+                    Kind::Thermal => (current.images, current.world_images),
+                    Kind::World => (Vec::new(), current.images),
+                };
+                let merged = |had: Vec<String>, picked: Vec<PathBuf>| {
+                    project::dedupe_and_sort(had.into_iter().map(PathBuf::from).chain(picked))
+                };
+                let project = Project::new(merged(had_thermal, thermal), merged(had_world, world));
+                project::save_project(&dir, &project)
+                    .map_err(|e| format!("Could not save the image list: {e}"))?;
+            }
         }
         Ok(Some(project_state(&app)))
+    })
+    .await
+}
+
+/// Opens the folder dialog and makes a project of the photos in the picked folder,
+/// sorted into thermal and world ones.
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle, window: WebviewWindow) -> Result<OpenOutcome, String> {
+    if app.state::<AppState>().stitch.is_running() {
+        return Err(BUSY.into());
+    }
+    blocking(move || {
+        let picked = app
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("Select a folder with drone photos")
+            .blocking_pick_folder();
+        let Some(folder) = picked.and_then(|p| p.into_path().ok()) else {
+            return Ok(OpenOutcome::Cancelled);
+        };
+        let mut flights = scan::scan_folder(&folder)?;
+        match flights.len() {
+            0 => Err("There are no photos in that folder".into()),
+            1 => Ok(OpenOutcome::Opened {
+                state: Box::new(open_flight_now(&app, flights.remove(0))?),
+            }),
+            _ => {
+                static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+                let scan_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let summaries = flights.iter().map(FlightSummary::from).collect();
+                *lock(&app.state::<AppState>().flights) = Some(PendingFlights {
+                    id: scan_id,
+                    flights,
+                });
+                Ok(OpenOutcome::ChooseFlight {
+                    scan_id,
+                    folder: folder
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    flights: summaries,
+                })
+            }
+        }
+    })
+    .await
+}
+
+/// Opens one of the flights pick_folder found.
+#[tauri::command]
+pub async fn open_flight(
+    app: AppHandle,
+    scan_id: u64,
+    index: usize,
+) -> Result<ProjectState, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let flight = lock(&state.flights)
+            .as_ref()
+            .filter(|pending| pending.id == scan_id)
+            .and_then(|pending| pending.flights.get(index).cloned())
+            .ok_or("That list of flights is gone; open the folder again")?;
+        let opened = open_flight_now(&app, flight)?;
+        *lock(&state.flights) = None;
+        Ok(opened)
     })
     .await
 }
@@ -109,7 +235,10 @@ pub async fn clear_project(app: AppHandle) -> Result<ProjectState, String> {
             if state.stitch.is_running() {
                 return Err(BUSY.into());
             }
-            project::save_images(&dir, &[])
+            if state.export.is_running() {
+                return Err(EXPORTING.into());
+            }
+            project::save_project(&dir, &Project::default())
                 .map_err(|e| format!("Could not save the image list: {e}"))?;
             project::delete_panorama(&dir)
                 .map_err(|e| format!("Could not remove the panorama: {e}"))?;
@@ -168,9 +297,14 @@ pub async fn export_files(app: AppHandle, request: ExportRequest) -> Result<Expo
     blocking(move || export::run(&app, &request)).await
 }
 
+/// Stitches the panorama, or with target "world" the world mosaic that goes with it.
 #[tauri::command]
-pub async fn stitch_images(app: AppHandle, run_id: u64) -> Result<ProjectState, String> {
-    blocking(move || stitch::run(&app, run_id)).await
+pub async fn stitch_images(
+    app: AppHandle,
+    run_id: u64,
+    target: Option<StitchTarget>,
+) -> Result<ProjectState, String> {
+    blocking(move || stitch::run(&app, run_id, target.unwrap_or_default())).await
 }
 
 #[tauri::command]
@@ -178,17 +312,17 @@ pub fn cancel_stitch(app: AppHandle) -> bool {
     app.state::<AppState>().stitch.cancel()
 }
 
-/// Raw bytes of an image in the current set or of the current panorama.
+/// Raw bytes of an image in the current set, of the current panorama or of the world view.
 #[tauri::command]
 pub async fn load_image(app: AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
     blocking(move || {
-        let dir = data_dir(&app)?;
-        let images = project::load_images(&dir);
-        let panorama = project::load_panorama(&dir);
-        let allowed: Vec<&str> = images
+        let state = project_state(&app);
+        let allowed: Vec<&str> = state
+            .images
             .iter()
             .map(String::as_str)
-            .chain(panorama.as_ref().map(|p| p.path.as_str()))
+            .chain(state.panorama.as_ref().map(|p| p.path.as_str()))
+            .chain(state.world_view.as_ref().map(|v| v.path.as_str()))
             .collect();
         let file = project::allowed_path(Path::new(&path), allowed.iter().copied())
             .ok_or_else(|| not_allowed_reason(&path, &allowed))?;

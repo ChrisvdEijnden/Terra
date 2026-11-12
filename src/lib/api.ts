@@ -18,17 +18,53 @@ export interface PanoramaInfo {
     panoScale: number | null;
     /** True when the panorama can be placed on a map. */
     georeferenced: boolean;
+    /** World mosaic: its photos were lined up with the thermal panorama. False when they are
+     *  placed by their own GPS (or without the camera offset) and may be a few metres off. */
+    aligned: boolean;
+}
+
+/** The camera a set of photos came from; "world" is visible light (RGB). */
+export type PhotoKind = "thermal" | "world";
+
+/** The panorama that is measured on, or the world mosaic that goes with a thermal one. */
+export type StitchTarget = "primary" | "world";
+
+/** The world mosaic on the frame of the panorama, to draw in its place. */
+export interface WorldView {
+    path: string;
+    mtimeMs: number;
 }
 
 export interface ProjectState {
     /** Null until the user names the project. */
     name: string | null;
+    /** The photos that are measured on. */
     images: string[];
+    /** What `images` are. */
+    kind: PhotoKind;
+    /** The RGB photos that go with thermal `images`. */
+    worldImages: string[];
     panorama: PanoramaInfo | null;
-    stitching: boolean;
+    worldPanorama: PanoramaInfo | null;
+    /** Null until the world mosaic is stitched for this panorama and these photos. */
+    worldView: WorldView | null;
+    /** The mosaic that is being stitched right now, if any. */
+    stitching: StitchTarget | null;
 }
 
 export type PickMode = "replace" | "add";
+
+/** One flight in a picked folder, with its number of photos per camera. */
+export interface FlightSummary {
+    label: string;
+    thermal: number;
+    world: number;
+}
+
+export type OpenOutcome =
+    | { outcome: "cancelled" }
+    | { outcome: "opened"; state: ProjectState }
+    | { outcome: "chooseFlight"; scanId: number; folder: string; flights: FlightSummary[] };
 
 export interface StitchLogPayload {
     runId: number;
@@ -41,14 +77,25 @@ export const getProject = (): Promise<ProjectState> => invoke<ProjectState>("get
 export const pickImages = (mode: PickMode): Promise<ProjectState | null> =>
     invoke<ProjectState | null>("pick_images", { mode });
 
+/**
+ * Opens the native folder dialog (from Rust) and makes a project of the photos in the
+ * picked folder, sorted into thermal and world ones.
+ */
+export const pickFolder = (): Promise<OpenOutcome> => invoke<OpenOutcome>("pick_folder");
+
+/** Opens one of the flights pickFolder found. */
+export const openFlight = (scanId: number, index: number): Promise<ProjectState> =>
+    invoke<ProjectState>("open_flight", { scanId, index });
+
 export const clearProject = (): Promise<ProjectState> => invoke<ProjectState>("clear_project");
 
-export const stitchImages = (runId: number): Promise<ProjectState> => invoke<ProjectState>("stitch_images", { runId });
+export const stitchImages = (runId: number, target: StitchTarget = "primary"): Promise<ProjectState> =>
+    invoke<ProjectState>("stitch_images", { runId, target });
 
 /** True when a running stitch was killed. */
 export const cancelStitch = (): Promise<boolean> => invoke<boolean>("cancel_stitch");
 
-/** Raw file bytes of an image in the current set or of the current panorama. */
+/** Raw file bytes of an image in the current set, of the current panorama or of the world view. */
 export async function loadImageBytes(path: string): Promise<ArrayBuffer> {
     const r: unknown = await invoke("load_image", { path });
     if (r instanceof ArrayBuffer) return r;
@@ -65,7 +112,8 @@ export function onStitchLog(handler: (payload: StitchLogPayload) => void): Promi
 /** Saves the name; the returned state holds it as it will be used in file names. */
 export const setProjectName = (name: string): Promise<ProjectState> => invoke<ProjectState>("set_project_name", { name });
 
-export type ExportKind = "orthomosaic" | "polygon" | "area";
+/** "thermal" and "world" are the orthomosaics of those photos. */
+export type ExportKind = "thermal" | "world" | "polygon" | "area";
 
 export interface ExportRequest {
     kinds: ExportKind[];

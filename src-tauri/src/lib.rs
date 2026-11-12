@@ -2,6 +2,7 @@ mod commands;
 mod export;
 mod project;
 mod python;
+mod scan;
 mod stitch;
 
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
-use project::ProjectState;
+use project::{Project, ProjectState, StitchTarget};
 
 /// App-wide state.
 #[derive(Default)]
@@ -18,6 +19,10 @@ pub struct AppState {
     project_lock: Mutex<()>,
     /// The single stitch run (child process handle, cancel flag).
     stitch: stitch::StitchState,
+    /// Which mosaic that run makes (meaningful while it runs).
+    stitch_target: Mutex<StitchTarget>,
+    /// Flights of the folder that was picked last, while the user chooses one.
+    flights: Mutex<Option<commands::PendingFlights>>,
     /// The single export run (same one-child-at-a-time bookkeeping as the stitch).
     export: stitch::StitchState,
     /// First interpreter that passed the import probe (successes only).
@@ -42,23 +47,35 @@ pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn project_state(app: &AppHandle) -> ProjectState {
-    let stitching = app.state::<AppState>().stitch.is_running();
-    match data_dir(app) {
-        Ok(dir) => ProjectState {
-            name: project::load_name(&dir),
-            images: project::load_images(&dir),
-            panorama: project::load_panorama(&dir),
-            stitching,
-        },
-        Err(e) => {
-            eprintln!("[terra] {e}");
-            ProjectState {
-                name: None,
-                images: Vec::new(),
-                panorama: None,
-                stitching,
-            }
-        }
+    let state = app.state::<AppState>();
+    let stitching = state
+        .stitch
+        .is_running()
+        .then(|| *lock(&state.stitch_target));
+    let dir = data_dir(app).map_err(|e| eprintln!("[terra] {e}")).ok();
+    let dir = dir.as_deref();
+    let project = dir.map(project::load_project).unwrap_or_default();
+    let panorama = dir.and_then(project::load_panorama);
+    let world_panorama = dir.and_then(|dir| project::load_mosaic(dir, StitchTarget::World));
+    let world_view = project::world_view(
+        panorama.as_ref(),
+        world_panorama.as_ref(),
+        &project.world_images,
+    );
+    let Project {
+        images,
+        kind,
+        world_images,
+    } = project;
+    ProjectState {
+        name: dir.and_then(project::load_name),
+        images,
+        kind,
+        world_images,
+        panorama,
+        world_panorama,
+        world_view,
+        stitching,
     }
 }
 
@@ -85,6 +102,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_project,
             commands::pick_images,
+            commands::pick_folder,
+            commands::open_flight,
             commands::clear_project,
             commands::stitch_images,
             commands::cancel_stitch,

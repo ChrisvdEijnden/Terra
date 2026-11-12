@@ -2,10 +2,11 @@
 
 Terra is a macOS desktop app for measuring water surface area from drone surveys.
 
-1. Pick a set of overlapping nadir photos from one DJI flight (thermal `_T` or visible `_V`/`_W` images, not both).
-2. Terra stitches them into one north-up panorama with a bundled Python script (OpenCV via the [`stitching`](https://github.com/OpenStitching/stitching) package). For DJI photos, the GPS position, altitude and gimbal yaw in each image's metadata place the images, so long survey strips do not bend.
+1. Open the folder of one DJI flight with overlapping nadir photos. Terra sorts the photos itself: thermal ones (`_T`) are measured on, the visible-light ones of the wide camera (`_W`/`_V`, called *world* photos here) go along, and zoom photos (`_Z`) are left out. The two kinds may be mixed in one folder or sit in a folder each (`44/T`, `44/W`). A folder that holds several flights gives a list to choose from, and photos can still be picked by hand. A folder with only RGB photos works too: those are then measured on.
+2. Terra stitches the thermal photos into one north-up panorama with a bundled Python script (OpenCV via the [`stitching`](https://github.com/OpenStitching/stitching) package). For DJI photos, the GPS position, altitude and gimbal yaw in each image's metadata place the images, so long survey strips do not bend.
 3. Click the water colour on the panorama. Terra counts the matching pixels and converts them to hectares using the ground sampling distance (GSD).
-4. Name the project in the breadcrumb and use the download menu to save `orthomosaic_<name>-ir.tif` (GeoTIFF, WGS84), `polygon_<name>.kmz` (water mask) and `hectare_<name>.txt` (area) to `Documents/Terra/<name>`. The GeoTIFF and KMZ need a panorama stitched from photos with GPS data.
+4. The Thermal / World switch at the bottom shows the world photos in place of the thermal panorama, with the water mask on top. The world mosaic is only stitched the first time it is asked for (by the switch or by a download), at about twice the detail of the thermal panorama; that takes a few minutes. Each world photo is placed where its thermal twin (the photo of the same shot) landed in the thermal panorama, and Terra works out from the photos how far the wide camera is tilted and how far apart the two cameras look, so the two mosaics line up to within a few decimetres. Measuring the distance between the cameras takes a flight with lines flown both ways: when all photos face the same way it is left out. When the world photos do not match each other well enough, they are placed at their twins without either correction, and when there are too few twins, by their own GPS. When the thermal panorama itself does not fit together everywhere (flight lines stitched apart), the world photos cannot follow it there. In those cases the two mosaics can be a metre or more apart, and the app says so when it shows the world view. Without map coordinates on the thermal panorama there is no world view.
+5. The project is named after the folder (rename it in the breadcrumb). The download menu saves `orthomosaic_<name>_T.tif` and `orthomosaic_<name>_W.tif` (GeoTIFF, WGS84), `polygon_<name>.kmz` (water mask) and `hectare_<name>.txt` (area) to `Documents/Terra/<name>`. The GeoTIFFs and the KMZ need a panorama stitched from photos with GPS data.
 
 Built with Tauri v2 (Rust), React 19, Vite and TypeScript.
 
@@ -56,7 +57,7 @@ Avoid `/usr/bin/python3` on machines without the Xcode Command Line Tools. That 
 python3 -u src-tauri/python/photo_stitcher.py --input stitch_input.json --output-dir out/
 ```
 
-`stitch_input.json` looks like `{"images": ["/abs/path/DJI_0001_T.JPG", ...]}`. The script writes progress lines to stderr. On success, it writes `panorama.png` (RGBA, transparent where there is no image data) and then `result.json`. On a handled error, it prints `ERROR: <reason>` as its last line, exits with code 2 and normally leaves the previous output untouched. (In the unlikely case that saving fails while the new `panorama.png` and `result.json` are being moved into place, the old `result.json` is already removed, so no panorama is shown until the next stitch.)
+`stitch_input.json` looks like `{"images": ["/abs/path/DJI_0001_T.JPG", ...]}`. Three optional keys are what Terra adds for the world mosaic: `"target_gsd"` (metres per panorama pixel to aim for; photos are scaled down to about that), `"view"` (also save the mosaic on the map frame of another panorama, so the two can be shown on top of each other) and `"align_to"` (the `result.json` of the panorama stitched from the other camera's photos of the same flight: each photo is then placed where its twin, the photo with the same shot number and time in the file name, landed there, and the offset and tilt between the two cameras are solved from the matches). `result.json` lists under `"poses"` where every included photo landed (`lon`/`lat` of its centre and `yaw` of its top edge, next to its GPS tags `gps_lon`/`gps_lat`/`gps_yaw`), and `"aligned"` says whether the photos were lined up with the other panorama including the offset between the cameras. Without `target_gsd`, photos larger than 2 megapixels are scaled down to that size. `--panorama-name` and `--result-name` change the names of the two output files. The script writes progress lines to stderr. On success, it writes `panorama.png` (RGBA, transparent where there is no image data) and then `result.json`. On a handled error, it prints `ERROR: <reason>` as its last line, exits with code 2 and normally leaves the previous output untouched. (In the unlikely case that saving fails while the new `panorama.png` and `result.json` are being moved into place, the old `result.json` is already removed, so no panorama is shown until the next stitch.)
 
 `TERRA_NEIGHBOUR_RADIUS` (default `0.5`) controls which image pairs are matched: only pairs whose GPS positions are closer than this fraction of an image's ground footprint.
 
@@ -66,10 +67,15 @@ Terra writes nothing into the source tree. The project state and stitch output g
 
 ```
 ~/Library/Application Support/com.chrisvandeneijnden.terra-app/
-  project.json        the selected images
+  project.json        the selected images: the ones measured on, and the world photos
   stitch_input.json   input for the current/last stitch
   panorama.png        the last successful panorama
-  result.json         metadata of that panorama (size, included images, GSD, scale)
+  result.json         metadata of that panorama (size, included images, GSD, scale,
+                      where each photo landed; the world mosaic is placed by that)
+  world_input.json    the same three files for the world mosaic,
+  world.png           which exists once it has been asked for
+  world_result.json
+  world_view.webp     the world mosaic on the frame of panorama.png, as the app shows it
 ```
 
 Delete the folder to reset Terra.

@@ -1,12 +1,13 @@
-"""Terra exporter: the orthomosaic as a GeoTIFF and the water mask as a KMZ polygon.
+"""Terra exporter: orthomosaics as GeoTIFFs and the water mask as a KMZ polygon.
 
     python3 -u terra_export.py --job <dir>/export-job.tmp
 
-Job (JSON, written by Rust):
-  {"panorama": "/abs/panorama.png", "width": 100, "height": 50, "name": "Polder",
-   "geotransform": [lon0, dlon, 0, lat0, 0, dlat],
-   "orthomosaic": "/abs/out.tif" or null,
-   "polygon": "/abs/out.kmz" or null, "mask": "/abs/mask.bin" or null}
+Job (JSON, written by Rust), with geotransform = [lon0, dlon, 0, lat0, 0, dlat]:
+  {"name": "Polder",
+   "orthomosaics": [{"panorama": "/abs/panorama.png", "geotransform": [...],
+                     "output": "/abs/out.tif"}, ...],
+   "polygon": {"mask": "/abs/mask.bin", "width": 100, "height": 50,
+               "geotransform": [...], "output": "/abs/out.kmz"} or null}
 
 The mask holds one byte per panorama pixel (row by row), non-zero for water.
 A handled failure ends with "ERROR: <sentence>" on stderr and exit code 2. Every output
@@ -121,14 +122,15 @@ def _write_ifd(f, entries):
     return ifd_offset
 
 
-def write_geotiff(path, rgba, geotransform):
-    """Writes an 8-bit RGBA GeoTIFF: Deflate compressed, north-up, WGS84."""
-    height, width = rgba.shape[:2]
+def write_geotiff(path, bgra, geotransform):
+    """Writes OpenCV's BGRA pixels as an 8-bit RGBA GeoTIFF: Deflate compressed, north-up, WGS84."""
+    height, width = bgra.shape[:2]
     with open(path, "wb") as f:
         f.write(b"II*\0" + struct.pack("<I", 0))  # the directory offset is patched in below
         offsets, counts = [], []
         for top in range(0, height, ROWS_PER_STRIP):
-            strip = rgba[top:top + ROWS_PER_STRIP]
+            # a strip at a time, so a large mosaic is never in memory twice
+            strip = bgra[top:top + ROWS_PER_STRIP][..., [2, 1, 0, 3]]
             delta = strip.copy()
             delta[:, 1:] = strip[:, 1:] - strip[:, :-1]  # uint8, wraps as the predictor requires
             data = zlib.compress(delta.tobytes(), 6)
@@ -146,14 +148,13 @@ def write_geotiff(path, rgba, geotransform):
         os.fsync(f.fileno())
 
 
-def export_orthomosaic(job):
-    panorama = cv2.imread(job["panorama"], cv2.IMREAD_UNCHANGED)
+def export_orthomosaic(mosaic):
+    panorama = cv2.imread(mosaic["panorama"], cv2.IMREAD_UNCHANGED)
     if panorama is None:
         raise UserError("The panorama could not be read.")
     if panorama.ndim != 3 or panorama.shape[2] != 4:
         raise UserError("The panorama has no transparency channel; stitch again.")
-    rgba = cv2.cvtColor(panorama, cv2.COLOR_BGRA2RGBA)
-    _replace_when_done(job["orthomosaic"], lambda tmp: write_geotiff(tmp, rgba, job["geotransform"]))
+    _replace_when_done(mosaic["output"], lambda tmp: write_geotiff(tmp, panorama, mosaic["geotransform"]))
 
 
 # --------------------------------------------------------------------------- polygons
@@ -278,10 +279,10 @@ def polygons_kml(polygons, geotransform, name):
     )
 
 
-def load_mask(job):
-    width, height = job["width"], job["height"]
+def load_mask(polygon):
+    width, height = polygon["width"], polygon["height"]
     try:
-        with open(job["mask"], "rb") as f:
+        with open(polygon["mask"], "rb") as f:
             mask = np.frombuffer(f.read(), np.uint8)
     except OSError as exc:
         raise UserError(f"Could not read the water mask: {exc.strerror or exc}") from None
@@ -290,17 +291,17 @@ def load_mask(job):
     return mask.reshape(height, width)
 
 
-def export_polygon(job):
-    polygons = water_polygons(load_mask(job))
+def export_polygon(polygon, name):
+    polygons = water_polygons(load_mask(polygon))
     if not polygons:
         raise UserError("No water is selected.")
-    kml = polygons_kml(polygons, job["geotransform"], job["name"])
+    kml = polygons_kml(polygons, polygon["geotransform"], name)
 
     def write(tmp):
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as kmz:
             kmz.writestr("doc.kml", kml.encode("utf-8"))
 
-    _replace_when_done(job["polygon"], write)
+    _replace_when_done(polygon["output"], write)
 
 
 # --------------------------------------------------------------------------- main
@@ -313,12 +314,12 @@ def run(job_path):
     except (OSError, ValueError) as exc:
         raise UserError(f"Could not read the export job: {exc}") from None
     try:
-        if job.get("orthomosaic"):
-            log("Writing the orthomosaic")
-            export_orthomosaic(job)
+        for mosaic in job.get("orthomosaics") or []:
+            log(f"Writing {os.path.basename(mosaic['output'])}")
+            export_orthomosaic(mosaic)
         if job.get("polygon"):
             log("Writing the water polygons")
-            export_polygon(job)
+            export_polygon(job["polygon"], job["name"])
     except OSError as exc:
         raise UserError(str(exc.strerror or exc)) from None  # the app says what failed
 

@@ -12,10 +12,12 @@ use serde::Serialize;
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::project::{self, ProjectState};
+use crate::project::{self, MapFrame, PanoramaInfo, ProjectState, StitchTarget};
 use crate::{lock, python, AppState};
 
 pub const SCRIPT_RESOURCE: &str = "python/photo_stitcher.py";
+/// The world mosaic aims for this many times the detail of the panorama it goes with.
+const WORLD_DETAIL: f64 = 2.0;
 /// Exact text the frontend compares against (STITCH_CANCELLED).
 pub const CANCELLED: &str = "Stitching cancelled";
 const POLL: Duration = Duration::from_millis(100);
@@ -35,6 +37,59 @@ struct Slot {
     running: bool,
     cancelled: bool,
     child: Option<Arc<Mutex<Child>>>,
+}
+
+/// The stitcher's input file.
+#[derive(Debug, Serialize)]
+struct StitchInput<'a> {
+    images: &'a [String],
+    /// Metres per panorama pixel to aim for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_gsd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<ViewRequest>,
+    /// The result file of the panorama these photos are lined up with: they are placed
+    /// where their twins (the other camera's photos of the same shots) landed in it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    align_to: Option<PathBuf>,
+}
+
+/// Asks for the mosaic to be saved once more, on the frame of another panorama.
+#[derive(Debug, Serialize)]
+struct ViewRequest {
+    name: &'static str,
+    #[serde(flatten)]
+    frame: MapFrame,
+}
+
+impl<'a> StitchInput<'a> {
+    /// The world mosaic takes its detail, its view and the places of its photos from the
+    /// panorama it goes with (stored in `dir`); the panorama itself is stitched as the
+    /// photos are.
+    fn new(
+        images: &'a [String],
+        target: StitchTarget,
+        panorama: Option<&PanoramaInfo>,
+        dir: &Path,
+    ) -> Self {
+        let panorama = panorama.filter(|_| target == StitchTarget::World);
+        StitchInput {
+            images,
+            target_gsd: panorama
+                .and_then(PanoramaInfo::metres_per_pixel)
+                .map(|metres| metres / WORLD_DETAIL),
+            view: panorama
+                .and_then(PanoramaInfo::frame)
+                .map(|frame| ViewRequest {
+                    name: project::WORLD_VIEW_FILE,
+                    frame,
+                }),
+            // a panorama that is not on the map has no places to hand on
+            align_to: panorama
+                .filter(|panorama| panorama.georeferenced)
+                .map(|_| dir.join(StitchTarget::Primary.result_file())),
+        }
+    }
 }
 
 /// Shared state of the (single) stitch run.
@@ -273,31 +328,39 @@ pub(crate) fn script_path(app: &AppHandle, resource: &str) -> Result<PathBuf, St
 }
 
 /// Runs a whole stitch (blocking). Called on a blocking thread by the command.
-pub fn run(app: &AppHandle, run_id: u64) -> Result<ProjectState, String> {
+pub fn run(app: &AppHandle, run_id: u64, target: StitchTarget) -> Result<ProjectState, String> {
     let state = app.state::<AppState>();
     let guard = state.stitch.try_begin()?;
+    *lock(&state.stitch_target) = target;
     if state.export.is_running() {
         return Err("Wait for the export to finish".into());
     }
 
     let dir = crate::data_dir(app)?;
-    let images = {
+    let (project, panorama) = {
         let _project = lock(&state.project_lock);
         // Leftovers of a killed run (SIGKILL leaves Python no chance to clean up). Safe:
-        // pick_images/clear_project are refused while a stitch runs.
+        // opening and clearing a project are refused while a stitch runs.
         project::cleanup_temp_files(&dir);
-        project::load_images(&dir)
+        (project::load_project(&dir), project::load_panorama(&dir))
     };
+    let images = project.images_for(target);
     if images.len() < 2 {
-        return Err("Select at least two images to stitch".into());
+        return Err(match target {
+            StitchTarget::Primary => "Select at least two images to stitch".into(),
+            StitchTarget::World => "There are no world photos to stitch".into(),
+        });
     }
-    // Python writes result.json last and only on success, so a changed result.json
+    // Python writes the result file last and only on success, so a changed result file
     // after the run means this run committed a new panorama.
-    let result_file = dir.join(project::RESULT_FILE);
+    let result_file = dir.join(target.result_file());
     let result_before = file_identity(&result_file);
-    let input = dir.join(project::STITCH_INPUT_FILE);
-    project::write_image_list(&input, &images)
-        .map_err(|e| format!("Could not write the stitch input: {e}"))?;
+    let input = dir.join(target.input_file());
+    let job = StitchInput::new(images, target, panorama.as_ref(), &dir);
+    let job = serde_json::to_vec_pretty(&job)
+        .map_err(std::io::Error::other)
+        .and_then(|json| project::write_atomic(&input, &json));
+    job.map_err(|e| format!("Could not write the stitch input: {e}"))?;
 
     let emit = |line: &str| {
         let _ = app.emit("stitch-log", StitchLog { run_id, line });
@@ -316,6 +379,10 @@ pub fn run(app: &AppHandle, run_id: u64) -> Result<ProjectState, String> {
         .arg(&input)
         .arg("--output-dir")
         .arg(&dir)
+        .arg("--panorama-name")
+        .arg(target.panorama_file())
+        .arg("--result-name")
+        .arg(target.result_file())
         .current_dir(&dir)
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -365,8 +432,8 @@ pub fn run(app: &AppHandle, run_id: u64) -> Result<ProjectState, String> {
 
     // A cancel or kill that lands after the commit (e.g. during interpreter teardown)
     // must not report "cancelled" while a new panorama is on disk.
-    let committed =
-        file_identity(&result_file) != result_before && project::load_panorama(&dir).is_some();
+    let committed = file_identity(&result_file) != result_before
+        && project::load_mosaic(&dir, target).is_some();
     if !committed {
         project::cleanup_temp_files(&dir);
         if state.stitch.is_cancelled() {
@@ -491,6 +558,59 @@ mod tests {
         assert!(wait_with_timeout(&mut child, Duration::from_secs(60), &|| true).is_none());
         assert!(start.elapsed() < Duration::from_secs(5));
         assert!(child.try_wait().unwrap().is_some(), "child reaped");
+    }
+
+    #[test]
+    fn world_stitch_takes_detail_and_view_from_the_panorama() {
+        let images = vec!["/a_W.JPG".to_string(), "/b_W.JPG".to_string()];
+        let panorama = PanoramaInfo {
+            path: "/d/panorama.png".into(),
+            mtime_ms: 1,
+            width: 300,
+            height: 200,
+            images: Vec::new(),
+            included_images: Vec::new(),
+            gps_aligned: true,
+            estimated_gsd: Some(0.09),
+            pano_scale: Some(1.0),
+            georeferenced: true,
+            aligned: false,
+            geotransform: Some([5.3, 1e-6, 0.0, 52.2, 0.0, -1e-6]),
+            view: None,
+        };
+        let json = |target, panorama: Option<&PanoramaInfo>| {
+            serde_json::to_value(StitchInput::new(&images, target, panorama, Path::new("/d")))
+                .unwrap()
+        };
+
+        let world = json(StitchTarget::World, Some(&panorama));
+        assert_eq!(world["images"][1], "/b_W.JPG");
+        assert_eq!(world["target_gsd"], 0.045);
+        assert_eq!(world["view"]["name"], project::WORLD_VIEW_FILE);
+        assert_eq!(world["view"]["width"], 300);
+        assert_eq!(world["view"]["geotransform"][3], 52.2);
+        assert_eq!(world["align_to"], "/d/result.json");
+
+        // The panorama itself, and a world mosaic with nothing to go by, are stitched plainly.
+        for plain in [
+            json(StitchTarget::Primary, Some(&panorama)),
+            json(StitchTarget::World, None),
+        ] {
+            assert_eq!(plain.as_object().unwrap().len(), 1, "{plain}");
+        }
+        let no_gps = PanoramaInfo {
+            estimated_gsd: None,
+            georeferenced: false,
+            geotransform: None,
+            ..panorama
+        };
+        assert_eq!(
+            json(StitchTarget::World, Some(&no_gps))
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
