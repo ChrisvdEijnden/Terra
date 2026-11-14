@@ -1239,10 +1239,6 @@ function Dashboard() {
 
                     <div className="spacer"></div>
 
-                    <h2>{t("dashboard.title")}</h2>
-
-                    <div className="spacer"></div>
-
                     <input
                         className="project-name"
                         type="text"

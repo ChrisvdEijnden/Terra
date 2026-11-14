@@ -8,7 +8,6 @@ const en = {
     "settings.lightModeOn": "Light mode is on",
     "settings.toggleDarkMode": "Toggle dark mode",
 
-    "dashboard.title": "Dashboard",
     "dashboard.noiseLabel": "Noise Threshold:",
     "dashboard.noiseHint": "Ignore water patches smaller than this many panorama pixels",
     "dashboard.gsdHint": "Ground sampling distance: metres per pixel of one source photo",
@@ -117,7 +116,6 @@ const nl: Record<TranslationKey, string> = {
     "settings.lightModeOn": "Lichte modus staat aan",
     "settings.toggleDarkMode": "Donkere modus aan- of uitzetten",
 
-    "dashboard.title": "Dashboard",
     "dashboard.noiseLabel": "Ruisdrempel:",
     "dashboard.noiseHint": "Negeer waterplekken die kleiner zijn dan dit aantal panoramapixels",
     "dashboard.gsdHint": "Grondresolutie (GSD): meter per pixel van één bronfoto",
