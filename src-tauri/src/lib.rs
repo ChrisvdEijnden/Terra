@@ -1,6 +1,7 @@
 mod commands;
 mod export;
 mod project;
+mod projects;
 mod python;
 mod scan;
 mod stitch;
@@ -27,6 +28,8 @@ pub struct AppState {
     export: stitch::StitchState,
     /// First interpreter that passed the import probe (successes only).
     python: Mutex<Option<PathBuf>>,
+    /// Folder of the open project, once it has been looked up.
+    current_project: Mutex<Option<PathBuf>>,
 }
 
 /// Locks a mutex, ignoring poisoning (state stays usable after a panicked thread).
@@ -36,13 +39,41 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The app data dir (created on demand), e.g.
 /// ~/Library/Application Support/com.chrisvandeneijnden.terra-app on macOS.
-pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Could not find the app data folder: {e}"))?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The open project's folder inside the app data dir (see `projects`), which holds the
+/// files `project` describes.
+pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let state = app.state::<AppState>();
+    let mut current = lock(&state.current_project);
+    if let Some(dir) = current.as_ref().filter(|dir| dir.is_dir()) {
+        return Ok(dir.clone());
+    }
+    let dir = projects::ensure_current(&app_dir(app)?)
+        .map_err(|e| format!("Could not open the project folder: {e}"))?;
+    *current = Some(dir.clone());
+    Ok(dir)
+}
+
+/// Opens the project `id` (the caller holds the project lock and has checked that nothing
+/// runs). The project that was open is removed when it has no photos.
+pub(crate) fn switch_project(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    let root = app_dir(app)?;
+    let previous = data_dir(app).ok();
+    let dir = projects::set_current(&root, id)
+        .map_err(|e| format!("Could not open that project: {e}"))?;
+    *lock(&app.state::<AppState>().current_project) = Some(dir.clone());
+    if let Some(previous) = previous.filter(|p| *p != dir) {
+        projects::remove_if_empty(&previous);
+    }
     Ok(dir)
 }
 
@@ -112,6 +143,8 @@ pub fn run() {
             commands::export_conflicts,
             commands::stage_export_mask,
             commands::export_files,
+            commands::recent_projects,
+            commands::open_recent,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

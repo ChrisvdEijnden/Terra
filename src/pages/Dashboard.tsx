@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 
 import "../styles/global.css";
 import "./dashboard.css";
@@ -15,8 +15,10 @@ import {
     loadImageBytes,
     onStitchLog,
     openFlight,
+    openRecent,
     pickFolder,
     pickImages,
+    recentProjects,
     setProjectName,
     stageExportMask,
     stitchImages,
@@ -25,6 +27,7 @@ import {
     type FlightSummary,
     type PanoramaInfo,
     type ProjectState,
+    type RecentProject,
     type StitchTarget,
 } from "../lib/api.ts";
 import {
@@ -61,6 +64,8 @@ import Download21px from "../assets/icons/download-21px.svg";
 import StitchAgain21px from "../assets/icons/stitch-again-21px.svg";
 import Trash21px from "../assets/icons/trash-21px.svg";
 import Cancel21px from "../assets/icons/cancel-21px.svg";
+import Close21px from "../assets/icons/close-21px.svg";
+import ChevronDown21px from "../assets/icons/chevron-down-21px.svg";
 
 const CLICK_MOVE_THRESHOLD = 4; // px; a press that moves less than this is a click
 const CLEAR_CONFIRM_MS = 3000;
@@ -168,6 +173,22 @@ function useDismiss(
     }, [open, menuRef, canvasRef, close]);
 }
 
+/** Draws a one-colour SVG icon in the text colour (so it follows the theme and the
+ *  colour of a warning or error), with the icon as a CSS mask. */
+function maskIcon(url: string): CSSProperties {
+    const image = `url("${url}")`;
+    return { WebkitMaskImage: image, maskImage: image };
+}
+
+/** The × in the corner of every pop-up. */
+function CloseButton({ label, onClick }: { label: string; onClick: () => void }) {
+    return (
+        <button type="button" className="close-button" onClick={onClick} title={label} aria-label={label}>
+            <span className="icon-mask" style={maskIcon(Close21px)} aria-hidden="true" />
+        </button>
+    );
+}
+
 function mimeFor(path: string): string {
     const ext = path.split(".").pop()?.toLowerCase();
     if (ext === "png") return "image/png";
@@ -270,6 +291,14 @@ function Dashboard() {
     const [openMenu, setOpenMenu] = useState(false);
     const openMenuRef = useRef<HTMLDivElement | null>(null);
     const [flightChoice, setFlightChoice] = useState<FlightChoice | null>(null);
+
+    // ---- recent projects (under the project name)
+    const [recentOpen, setRecentOpen] = useState(false);
+    const [recent, setRecent] = useState<RecentProject[] | null>(null); // null while loading
+    const recentMenuRef = useRef<HTMLDivElement | null>(null);
+
+    // ---- a notice that was closed stays closed until it says something else
+    const [closedNotice, setClosedNotice] = useState<string | null>(null);
 
     // ---- world view (the RGB mosaic in place of the thermal panorama)
     const [worldOn, setWorldOn] = useState(false);
@@ -448,6 +477,7 @@ function Dashboard() {
     const openWith = useCallback(
         async (open: () => Promise<ProjectState | null>) => {
             setOpenMenu(false);
+            setRecentOpen(false);
             cancelClearConfirm();
             clearStatus();
             const seq = ++stateSeqRef.current;
@@ -483,6 +513,27 @@ function Dashboard() {
             return openWith(() => openFlight(choice.scanId, index));
         },
         [openWith]
+    );
+
+    const toggleRecent = useCallback(() => {
+        if (recentOpen) {
+            setRecentOpen(false);
+            return;
+        }
+        setRecentOpen(true);
+        setRecent(null);
+        recentProjects().then(setRecent, (err) => {
+            setRecentOpen(false);
+            showError(t("dashboard.recentFailed", { error: errorMessage(err) }));
+        });
+    }, [recentOpen, showError, t]);
+
+    const pickRecent = useCallback(
+        (id: string) => {
+            cancelClearConfirm();
+            return openWith(() => openRecent(id));
+        },
+        [cancelClearConfirm, openWith]
     );
 
     const onStitchAgain = useCallback(() => {
@@ -934,6 +985,9 @@ function Dashboard() {
     const closeOpenMenu = useCallback(() => setOpenMenu(false), []);
     useDismiss(openMenu, openMenuRef, canvasRef, closeOpenMenu);
 
+    const closeRecent = useCallback(() => setRecentOpen(false), []);
+    useDismiss(recentOpen, recentMenuRef, canvasRef, closeRecent);
+
     // The world mosaic of a thermal project is stitched when it is first asked for.
     const worldToStitch = hasWorld && !worldMosaic(project);
     // What is saved is what is selected when the files are written, which can be minutes
@@ -1200,7 +1254,7 @@ function Dashboard() {
 
     const projectNameText = nameDraft ?? project?.name ?? "";
 
-    const notice = !panorama
+    const fullNotice = !panorama
         ? null
         : stale
           ? {
@@ -1213,8 +1267,11 @@ function Dashboard() {
                   text: t("dashboard.partialPanorama", { included: panorama.includedImages.length, total: panorama.images.length }),
               }
             : null;
+    // closed for this panorama and these photos; a change brings it back
+    const noticeKey = fullNotice ? `${fullNotice.kind}|${panorama!.path}|${panorama!.mtimeMs}|${images.length}` : null;
+    const notice = noticeKey !== closedNotice ? fullNotice : null;
 
-    // The notice cannot be dismissed, so the image is fitted and clamped below it.
+    // While the notice shows, the image is fitted and clamped below it.
     const padding = notice ? NOTICE_PADDING : DEFAULT_PADDING;
     paddingRef.current = padding;
     useEffect(() => {
@@ -1239,26 +1296,76 @@ function Dashboard() {
 
                     <div className="spacer"></div>
 
-                    <input
-                        className="project-name"
-                        type="text"
-                        spellCheck={false}
-                        maxLength={MAX_PROJECT_NAME}
-                        value={projectNameText}
-                        placeholder={t("dashboard.untitled")}
-                        aria-label={t("dashboard.projectName")}
-                        title={t("dashboard.projectNameHint")}
-                        style={{ width: `${Math.max(projectNameText.length, t("dashboard.untitled").length) + 2}ch` }}
-                        onChange={(e) => setNameDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === "Enter") e.currentTarget.blur();
-                            else if (e.key === "Escape") {
-                                nameCancelledRef.current = true;
-                                e.currentTarget.blur();
-                            }
-                        }}
-                        onBlur={() => void commitName()}
-                    />
+                    <div className="project-switcher" ref={recentMenuRef}>
+                        <input
+                            className="project-name"
+                            type="text"
+                            spellCheck={false}
+                            maxLength={MAX_PROJECT_NAME}
+                            value={projectNameText}
+                            placeholder={t("dashboard.untitled")}
+                            aria-label={t("dashboard.projectName")}
+                            title={t("dashboard.projectNameHint")}
+                            style={{ width: `${Math.max(projectNameText.length, t("dashboard.untitled").length) + 2}ch` }}
+                            onChange={(e) => setNameDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") e.currentTarget.blur();
+                                else if (e.key === "Escape") {
+                                    nameCancelledRef.current = true;
+                                    e.currentTarget.blur();
+                                }
+                            }}
+                            onBlur={() => void commitName()}
+                        />
+                        <button
+                            type="button"
+                            className={`recent-toggle${recentOpen ? " open" : ""}`}
+                            onClick={toggleRecent}
+                            disabled={stitching || exporting}
+                            title={t("dashboard.recentProjects")}
+                            aria-label={t("dashboard.recentProjects")}
+                            aria-expanded={recentOpen}
+                        >
+                            <span className="icon-mask" style={maskIcon(ChevronDown21px)} aria-hidden="true" />
+                        </button>
+                        {recentOpen && (
+                            <div className="recent-popover" role="dialog" aria-label={t("dashboard.recentProjects")}>
+                                {recent === null ? (
+                                    <p className="recent-message">
+                                        <span className="spinner" aria-hidden="true" />
+                                    </p>
+                                ) : recent.length === 0 ? (
+                                    <p className="recent-message">{t("dashboard.recentEmpty")}</p>
+                                ) : (
+                                    <div className="recent-list">
+                                        {recent.map((item) => (
+                                            <button
+                                                key={item.id}
+                                                className="download-item"
+                                                onClick={() => void pickRecent(item.id)}
+                                            >
+                                                <span className="recent-name">{item.name ?? t("dashboard.untitled")}</span>
+                                                <small>
+                                                    {[
+                                                        t("dashboard.recentPhotos", { count: item.images }),
+                                                        item.openedAtMs > 0
+                                                            ? new Date(item.openedAtMs).toLocaleString(language, {
+                                                                  dateStyle: "medium",
+                                                                  timeStyle: "short",
+                                                              })
+                                                            : null,
+                                                        item.hasPanorama ? null : t("dashboard.recentNotStitched"),
+                                                    ]
+                                                        .filter(Boolean)
+                                                        .join(" · ")}
+                                                </small>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
 
                 <div className="system-actions">
@@ -1398,7 +1505,10 @@ function Dashboard() {
 
                 {flightChoice && (
                     <div className="flight-chooser" role="dialog" aria-label={t("dashboard.chooseFlightTitle")}>
-                        <h3>{t("dashboard.chooseFlightTitle")}</h3>
+                        <div className="dialog-header">
+                            <h3>{t("dashboard.chooseFlightTitle")}</h3>
+                            <CloseButton label={t("dashboard.dismiss")} onClick={() => setFlightChoice(null)} />
+                        </div>
                         <p>{t("dashboard.chooseFlightText", { folder: flightChoice.folder, count: flightChoice.flights.length })}</p>
                         <div className="flight-list">
                             {flightChoice.flights.map((flight, index) => (
@@ -1430,17 +1540,14 @@ function Dashboard() {
                         {notice && (
                             <div className={`notice ${notice.kind}`} title={notice.text}>
                                 <span className="text">{notice.text}</span>
+                                <CloseButton label={t("dashboard.dismiss")} onClick={() => setClosedNotice(noticeKey)} />
                             </div>
                         )}
                         {status && (
                             <div className={`status-bar ${status.kind}`} title={status.text} role="status">
                                 {status.kind === "progress" && <span className="spinner" aria-hidden="true" />}
                                 <span className="text">{status.text}</span>
-                                {status.kind !== "progress" && (
-                                    <button className="dismiss" onClick={clearStatus} title={t("dashboard.dismiss")} aria-label={t("dashboard.dismiss")}>
-                                        ×
-                                    </button>
-                                )}
+                                {status.kind !== "progress" && <CloseButton label={t("dashboard.dismiss")} onClick={clearStatus} />}
                             </div>
                         )}
                     </div>

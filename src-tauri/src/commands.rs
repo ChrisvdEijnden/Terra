@@ -9,8 +9,9 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::export::{self, ExportKind, ExportRequest, ExportResult};
 use crate::project::{self, Kind, Project, ProjectState, StitchTarget};
+use crate::projects::{self, RecentProject};
 use crate::scan::{self, Flight, FlightSummary, IMAGE_EXTENSIONS};
-use crate::{data_dir, lock, project_state, stitch, AppState};
+use crate::{app_dir, data_dir, lock, project_state, stitch, switch_project, AppState};
 
 const BUSY: &str = "Wait for the current stitch to finish";
 const EXPORTING: &str = "Wait for the export to finish";
@@ -48,19 +49,40 @@ pub enum OpenOutcome {
     },
 }
 
-/// Makes `project` the current one. `name` is the folder the photos came from.
-fn open_project(app: &AppHandle, project: &Project, name: Option<&str>) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let dir = data_dir(app)?;
-    let _project = lock(&state.project_lock);
+/// Refuses while a stitch or an export runs (call with the project lock held).
+fn ensure_idle(state: &AppState) -> Result<(), String> {
     if state.stitch.is_running() {
         return Err(BUSY.into());
     }
     if state.export.is_running() {
         return Err(EXPORTING.into());
     }
-    // The folder names the project, except that a name typed before the first photos
-    // were opened belongs to them.
+    Ok(())
+}
+
+/// Opens `project` as a project of its own; the one that was open is kept for the recent
+/// list. A kept project of the same photos is opened again instead, mosaics and all.
+/// `name` is the folder the photos came from.
+fn open_project(app: &AppHandle, project: &Project, name: Option<&str>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let root = app_dir(app)?;
+    let _project = lock(&state.project_lock);
+    ensure_idle(&state)?;
+    if let Some(id) = projects::find_same_photos(&root, project) {
+        switch_project(app, &id)?;
+        return Ok(());
+    }
+    let current = data_dir(app)?;
+    // An empty project takes the photos, so a name typed before the first photos were
+    // opened belongs to them; otherwise the folder names the project.
+    let dir = if project::load_project(&current).images.is_empty() {
+        current
+    } else {
+        projects::project_dir(
+            &root,
+            &projects::create(&root).map_err(|e| format!("Could not make a new project: {e}"))?,
+        )
+    };
     let typed_ahead =
         project::load_project(&dir).images.is_empty() && project::load_name(&dir).is_some();
     if !typed_ahead {
@@ -70,7 +92,15 @@ fn open_project(app: &AppHandle, project: &Project, name: Option<&str>) -> Resul
     }
     project::delete_panorama(&dir)
         .map_err(|e| format!("Could not remove the old panorama: {e}"))?;
-    project::save_project(&dir, project).map_err(|e| format!("Could not save the image list: {e}"))
+    project::save_project(&dir, project)
+        .map_err(|e| format!("Could not save the image list: {e}"))?;
+    let id = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    switch_project(app, &id)?;
+    Ok(())
 }
 
 fn open_flight_now(app: &AppHandle, flight: Flight) -> Result<ProjectState, String> {
@@ -232,12 +262,7 @@ pub async fn clear_project(app: AppHandle) -> Result<ProjectState, String> {
         let dir = data_dir(&app)?;
         {
             let _project = lock(&state.project_lock);
-            if state.stitch.is_running() {
-                return Err(BUSY.into());
-            }
-            if state.export.is_running() {
-                return Err(EXPORTING.into());
-            }
+            ensure_idle(&state)?;
             project::save_project(&dir, &Project::default())
                 .map_err(|e| format!("Could not save the image list: {e}"))?;
             project::delete_panorama(&dir)
@@ -260,6 +285,38 @@ pub async fn set_project_name(app: AppHandle, name: String) -> Result<ProjectSta
             let _project = lock(&state.project_lock);
             project::save_name(&dir, &project::sanitize_project_name(&name))
                 .map_err(|e| format!("Could not save the project name: {e}"))?;
+        }
+        Ok(project_state(&app))
+    })
+    .await
+}
+
+/// The other projects with photos, most recently opened first.
+#[tauri::command]
+pub async fn recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
+    blocking(move || {
+        let current = data_dir(&app)?;
+        let current = current
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut recent = projects::list(&app_dir(&app)?);
+        recent.retain(|p| p.id != current);
+        Ok(recent)
+    })
+    .await
+}
+
+/// Opens a project from the recent list.
+#[tauri::command]
+pub async fn open_recent(app: AppHandle, id: String) -> Result<ProjectState, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        {
+            let _project = lock(&state.project_lock);
+            ensure_idle(&state)?;
+            switch_project(&app, &id)?;
         }
         Ok(project_state(&app))
     })

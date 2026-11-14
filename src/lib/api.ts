@@ -112,6 +112,23 @@ export function onStitchLog(handler: (payload: StitchLogPayload) => void): Promi
 /** Saves the name; the returned state holds it as it will be used in file names. */
 export const setProjectName = (name: string): Promise<ProjectState> => invoke<ProjectState>("set_project_name", { name });
 
+/** A project in the recent list. */
+export interface RecentProject {
+    id: string;
+    name: string | null;
+    kind: PhotoKind;
+    /** Number of photos that are measured on. */
+    images: number;
+    hasPanorama: boolean;
+    openedAtMs: number;
+}
+
+/** The other projects with photos, most recently opened first. */
+export const recentProjects = (): Promise<RecentProject[]> => invoke<RecentProject[]>("recent_projects");
+
+/** Opens a project from the recent list, mosaics and all. */
+export const openRecent = (id: string): Promise<ProjectState> => invoke<ProjectState>("open_recent", { id });
+
 /** "thermal" and "world" are the orthomosaics of those photos. */
 export type ExportKind = "thermal" | "world" | "polygon" | "area";
 
