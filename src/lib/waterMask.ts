@@ -364,6 +364,142 @@ export function packRgba(r: number, g: number, b: number, a: number): number {
 export const OVERLAY_FILL = packRgba(0x94, 0xa3, 0xb8, 128); // selected water, translucent slate
 export const OVERLAY_EDGE = packRgba(0x0d, 0x94, 0x88, 255); // selected outline, brand teal
 export const OVERLAY_DESELECTED_EDGE = packRgba(160, 160, 160, 255); // deselected outline, grey
+export const OVERLAY_OUTSIDE_FILL = packRgba(0xdc, 0x26, 0x26, 128); // outside the lasso, translucent red
+export const OVERLAY_OUTSIDE_EDGE = packRgba(0xdc, 0x26, 0x26, 255); // lasso outline, red
+
+export interface Point {
+    x: number;
+    y: number;
+}
+
+/** Lasso region per pixel: outside the lasso, inside it, or outside and on its outline. */
+export const REGION_OUTSIDE = 0;
+export const REGION_INSIDE = 1;
+export const REGION_EDGE = 2;
+
+/** Area of a closed polygon in square pixels (shoelace formula). */
+export function polygonArea(points: readonly Point[]): number {
+    let twice = 0;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        twice += (points[j].x - points[i].x) * (points[j].y + points[i].y);
+    }
+    return Math.abs(twice) / 2;
+}
+
+/**
+ * Rasterizes a closed lasso (image coordinates, any number of loops) into one
+ * byte per pixel: REGION_INSIDE where the pixel centre is inside (non-zero
+ * winding, so a loop drawn over itself stays inside), REGION_EDGE on the outside
+ * pixels next to an inside pixel (the outline), REGION_OUTSIDE elsewhere.
+ */
+export function rasterizeLasso(points: readonly Point[], width: number, height: number): Uint8Array {
+    const region = new Uint8Array(width * height);
+    const n = points.length;
+    if (n < 3) return region;
+
+    // Crossings of the edges with each row's centre line, as (x, winding direction) pairs.
+    const rows: number[][] = new Array(height);
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+        const a = points[j];
+        const b = points[i];
+        if (a.y === b.y) continue;
+        const lo = a.y < b.y ? a : b;
+        const hi = a.y < b.y ? b : a;
+        const dir = b.y > a.y ? 1 : -1;
+        // rows whose centre y + 0.5 lies in [lo.y, hi.y)
+        const y0 = Math.max(0, Math.ceil(lo.y - 0.5));
+        const y1 = Math.min(height, Math.ceil(hi.y - 0.5));
+        const slope = (hi.x - lo.x) / (hi.y - lo.y);
+        for (let y = y0; y < y1; y++) {
+            const x = lo.x + (y + 0.5 - lo.y) * slope;
+            (rows[y] ??= []).push(x, dir);
+        }
+    }
+
+    const order: number[] = [];
+    for (let y = 0; y < height; y++) {
+        const row = rows[y];
+        if (!row) continue;
+        const count = row.length / 2;
+        order.length = count;
+        for (let k = 0; k < count; k++) order[k] = k;
+        order.sort((p, q) => row[p * 2] - row[q * 2]);
+        let winding = 0;
+        let start = 0;
+        const base = y * width;
+        for (let k = 0; k < count; k++) {
+            const x = row[order[k] * 2];
+            const before = winding;
+            winding += row[order[k] * 2 + 1];
+            if (before === 0 && winding !== 0) start = x;
+            else if (before !== 0 && winding === 0) {
+                // pixels whose centre x + 0.5 lies in [start, x)
+                const x0 = Math.max(0, Math.ceil(start - 0.5));
+                const x1 = Math.min(width, Math.ceil(x - 0.5));
+                if (x1 > x0) region.fill(REGION_INSIDE, base + x0, base + x1);
+            }
+        }
+    }
+
+    // The outline: outside pixels with an inside 4-neighbour.
+    const wm1 = width - 1;
+    const hm1 = height - 1;
+    for (let y = 0, i = 0; y < height; y++) {
+        for (let x = 0; x < width; x++, i++) {
+            if (region[i] === REGION_INSIDE) continue;
+            if (
+                (x > 0 && region[i - 1] === REGION_INSIDE) ||
+                (x < wm1 && region[i + 1] === REGION_INSIDE) ||
+                (y > 0 && region[i - width] === REGION_INSIDE) ||
+                (y < hm1 && region[i + width] === REGION_INSIDE)
+            ) {
+                region[i] = REGION_EDGE;
+            }
+        }
+    }
+    return region;
+}
+
+/** Selected-label lookup: 1 for components that pass the noise threshold and are not deselected. */
+function selectedLut(areas: Int32Array, noise: number, deselected: ReadonlySet<LabelId>): Uint8Array {
+    const selected = new Uint8Array(areas.length);
+    for (let l = 1; l < areas.length; l++) {
+        if (areas[l] >= noise && !deselected.has(l)) selected[l] = 1;
+    }
+    return selected;
+}
+
+/** Selected pixel count inside the lasso: the pixels buildMask writes with the same region. O(pixels). */
+export function countSelectedPixelsInRegion(
+    labels: Int32Array,
+    areas: Int32Array,
+    noise: number,
+    deselected: ReadonlySet<LabelId>,
+    region: Uint8Array
+): number {
+    const selected = selectedLut(areas, noise, deselected);
+    const n = Math.min(labels.length, region.length);
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+        if (region[i] !== REGION_INSIDE) continue;
+        const v = labels[i];
+        total += selected[v < 0 ? -v : v];
+    }
+    return total;
+}
+
+/**
+ * Paints everything outside the lasso over an overlay (see buildOverlay): a
+ * translucent red fill with a red outline along the lasso. Inside is left as is.
+ */
+export function paintOutsideRegion(region: Uint8Array, out: Uint32Array): void {
+    const n = Math.min(region.length, out.length);
+    for (let i = 0; i < n; i++) {
+        const r = region[i];
+        if (r === REGION_OUTSIDE) out[i] = OVERLAY_OUTSIDE_FILL;
+        else if (r === REGION_EDGE) out[i] = OVERLAY_OUTSIDE_EDGE;
+    }
+}
 
 /**
  * Writes the overlay for labels (boundaries marked by markBoundaries) into out,
@@ -398,23 +534,22 @@ export function buildOverlay(
 
 /**
  * Writes the selected water into out, one byte per pixel (1 = water): exactly the
- * pixels counted by countSelectedPixels and filled by buildOverlay.
+ * pixels counted by countSelectedPixels and filled by buildOverlay. With a lasso
+ * region only the water inside it (as countSelectedPixelsInRegion counts it).
  */
 export function buildMask(
     labels: Int32Array,
     areas: Int32Array,
     noise: number,
     deselected: ReadonlySet<LabelId>,
-    out: Uint8Array
+    out: Uint8Array,
+    region: Uint8Array | null = null
 ): void {
-    const selected = new Uint8Array(areas.length);
-    for (let l = 1; l < areas.length; l++) {
-        if (areas[l] >= noise && !deselected.has(l)) selected[l] = 1;
-    }
+    const selected = selectedLut(areas, noise, deselected);
     const n = Math.min(labels.length, out.length);
     for (let i = 0; i < n; i++) {
         const v = labels[i];
-        out[i] = selected[v < 0 ? -v : v];
+        out[i] = region && region[i] !== REGION_INSIDE ? 0 : selected[v < 0 ? -v : v];
     }
 }
 

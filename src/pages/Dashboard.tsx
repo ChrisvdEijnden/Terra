@@ -35,10 +35,16 @@ import {
     buildMask,
     buildOverlay,
     countSelectedPixels,
+    countSelectedPixelsInRegion,
     INELIGIBLE,
+    paintOutsideRegion,
+    polygonArea,
+    rasterizeLasso,
+    REGION_INSIDE,
     selectableLabelAt,
     toggleLabel,
     type LabelId,
+    type Point,
 } from "../lib/waterMask.ts";
 import { useWaterMask } from "../lib/useWaterMask.ts";
 import {
@@ -59,6 +65,8 @@ import { useTranslation } from "../lib/useTranslations.ts";
 import LogoIcon26px from "../assets/icons/logo-26px.svg";
 import SettingsIcon21px from "../assets/icons/settings-21px.svg";
 import EyedropperIcon21px from "../assets/icons/eyedropper-21px.svg";
+import LassoIcon21px from "../assets/icons/lasso-21px.svg";
+import Undo21px from "../assets/icons/undo-21px.svg";
 import FolderOpen21px from "../assets/icons/folderopen-21px.svg";
 import Download21px from "../assets/icons/download-21px.svg";
 import StitchAgain21px from "../assets/icons/stitch-again-21px.svg";
@@ -68,11 +76,15 @@ import Close21px from "../assets/icons/close-21px.svg";
 import ChevronDown21px from "../assets/icons/chevron-down-21px.svg";
 
 const CLICK_MOVE_THRESHOLD = 4; // px; a press that moves less than this is a click
+const LASSO_POINT_SPACING = 2; // px on screen between recorded lasso points
+const LASSO_MIN_AREA = 4; // image px²; a smaller lasso is a slip, not an area
+const LASSO_COLOR = "#DC2626"; // same red as the overlay outside the lasso (OVERLAY_OUTSIDE_EDGE)
 const CLEAR_CONFIRM_MS = 3000;
 const NOISE_DEBOUNCE_MS = 150;
 /** Keeps the top of the image clear of the persistent notice (top 12 + height 30 + gap 8). */
 const NOTICE_PADDING: Padding = { ...DEFAULT_PADDING, top: 50 };
 const EMPTY_SET: ReadonlySet<LabelId> = new Set();
+const MAX_UNDO = 100; // steps kept in the undo history
 const MAX_PROJECT_NAME = 100; // characters, same limit as the backend
 
 type StatusKind = "progress" | "error" | "warning" | "info";
@@ -110,6 +122,32 @@ interface LoadedImage {
     maskImageId: number;
 }
 
+interface Lasso {
+    /** Display key of the image it was drawn on. */
+    key: string;
+    points: Point[];
+}
+
+/** Water patches clicked away, for the segmentation with this key (see segKey). */
+interface Deselection {
+    segKey: string | null;
+    labels: ReadonlySet<LabelId>;
+}
+
+/** What one undo step puts back. */
+interface MeasureState {
+    refHue: number | null;
+    tolerance: number;
+    lasso: Lasso | null;
+    deselection: Deselection;
+}
+
+/** The same image, colour and tolerance always give the same labels, so a deselection
+ *  stays valid when an undo brings those settings back. */
+function segKey(seg: { imageId: number; refHue: number; tolerance: number }): string {
+    return `${seg.imageId}|${seg.refHue}|${seg.tolerance}`;
+}
+
 interface DragState {
     pointerId: number;
     startX: number;
@@ -117,6 +155,8 @@ interface DragState {
     lastX: number;
     lastY: number;
     dragging: boolean;
+    /** The press draws a lasso instead of panning. */
+    lasso: boolean;
 }
 
 /** Minimal shape of WebKit's non-standard GestureEvent (trackpad pinch). */
@@ -249,6 +289,8 @@ function Dashboard() {
     const drawPendingRef = useRef(0);
     const dragRef = useRef<DragState | null>(null);
     const gestureRef = useRef<{ startScale: number; x: number; y: number } | null>(null);
+    /** The lasso being drawn, in image coordinates (null when not drawing). */
+    const lassoDraftRef = useRef<Point[] | null>(null);
     /** Display key whose worker crash was already retried once. */
     const crashRetryKeyRef = useRef<string | null>(null);
 
@@ -268,12 +310,16 @@ function Dashboard() {
     const [noiseText, setNoiseText] = useState("0");
     const [noise, setNoise] = useState(0);
     const [picking, setPicking] = useState(true);
+    const [lassoMode, setLassoMode] = useState(false);
+    /** The area to measure in, for the image with this display key. */
+    const [lasso, setLasso] = useState<Lasso | null>(null);
     const [refHue, setRefHue] = useState<number | null>(null);
-    // Keyed by the segmentation's job id, so an outdated segmentation (and its labels) is not kept alive.
-    const [deselection, setDeselection] = useState<{ segId: number | null; labels: ReadonlySet<LabelId> }>({
-        segId: null,
-        labels: EMPTY_SET,
-    });
+    // Keyed by the segmentation's settings, so the labels of another segmentation are never applied.
+    const [deselection, setDeselection] = useState<Deselection>({ segKey: null, labels: EMPTY_SET });
+    /** Earlier measuring states, newest last. */
+    const [history, setHistory] = useState<MeasureState[]>([]);
+    /** Set while one slider drag (or key press) is changing the tolerance: it is one undo step. */
+    const toleranceStepRef = useRef(false);
     const [gsdText, setGsdText] = useState("");
     const [gsdTouched, setGsdTouched] = useState(false);
     const [dragging, setDragging] = useState(false);
@@ -307,7 +353,30 @@ function Dashboard() {
     const [worldLoading, setWorldLoading] = useState(false);
 
     const segmentation = mask.segmentation;
-    const deselected = segmentation && deselection.segId === segmentation.jobId ? deselection.labels : EMPTY_SET;
+    const deselected = segmentation && deselection.segKey === segKey(segmentation) ? deselection.labels : EMPTY_SET;
+
+    // ---- undo
+    const measureRef = useRef<MeasureState>({ refHue: null, tolerance: 1, lasso: null, deselection });
+    measureRef.current = { refHue, tolerance, lasso, deselection };
+    /** Call before a measuring change, so undo can put back what was there. */
+    const recordUndo = useCallback(() => {
+        const before = measureRef.current;
+        setHistory((h) => [...h.slice(-(MAX_UNDO - 1)), before]);
+    }, []);
+    const undo = () => {
+        const s = history[history.length - 1];
+        if (!s) return;
+        setHistory(history.slice(0, -1));
+        lassoDraftRef.current = null;
+        setLassoMode(false);
+        setPicking(s.refHue === null);
+        setRefHue(s.refHue);
+        setTolerance(s.tolerance);
+        setLasso(s.lasso);
+        setDeselection(s.deselection);
+    };
+    const undoRef = useRef(undo);
+    undoRef.current = undo;
 
     const stitching = localStitching || !!project?.stitching;
     const images = project?.images ?? [];
@@ -621,6 +690,20 @@ function Dashboard() {
         if (overlay && overlay.width === image.naturalWidth && overlay.height === image.naturalHeight) {
             ctx.drawImage(overlay, v.offsetX, v.offsetY, w, h);
         }
+
+        const draft = lassoDraftRef.current;
+        if (draft && draft.length > 1) {
+            ctx.beginPath();
+            for (const p of draft) ctx.lineTo(v.offsetX + p.x * v.scale, v.offsetY + p.y * v.scale);
+            ctx.closePath();
+            ctx.fillStyle = "rgba(220, 38, 38, 0.12)";
+            ctx.fill("nonzero");
+            ctx.strokeStyle = LASSO_COLOR;
+            ctx.lineWidth = 2;
+            ctx.lineJoin = "round";
+            ctx.lineCap = "round";
+            ctx.stroke();
+        }
     }, []);
 
     const requestDraw = useCallback(() => {
@@ -700,6 +783,10 @@ function Dashboard() {
         crashRetryKeyRef.current = null;
         setRefHue(null);
         setPicking(true);
+        setLassoMode(false);
+        setLasso(null);
+        lassoDraftRef.current = null;
+        setHistory([]); // the steps belong to the old image
         clearImage();
         const overlay = overlayCanvasRef.current;
         if (overlay) {
@@ -867,11 +954,24 @@ function Dashboard() {
         return () => window.clearTimeout(timer);
     }, [noiseText]);
 
-    // Overlay: rebuilt from labels only when segmentation / noise / deselection change.
+    // The lasso as one byte per image pixel (inside / outside / outline).
+    const lassoW = loaded && lasso && lasso.key === loaded.key ? loaded.width : 0;
+    const lassoH = loaded && lasso && lasso.key === loaded.key ? loaded.height : 0;
+    const lassoPoints = lassoW > 0 ? lasso!.points : null;
+    const lassoSize = useMemo(() => (lassoW > 0 ? { width: lassoW, height: lassoH } : null), [lassoW, lassoH]);
+    const region = useMemo(
+        () => (lassoPoints && lassoSize ? rasterizeLasso(lassoPoints, lassoSize.width, lassoSize.height) : null),
+        [lassoPoints, lassoSize]
+    );
+    // a lasso for another image does not apply (its key is compared too, in case the sizes match)
+    const lassoRegion = region && loaded && loaded.key === displayKey ? region : null;
+
+    // Overlay: rebuilt from labels only when segmentation / noise / deselection / lasso change.
     useEffect(() => {
         if (!overlayCanvasRef.current) overlayCanvasRef.current = document.createElement("canvas");
         const overlay = overlayCanvasRef.current;
-        if (!segmentation) {
+        const size = segmentation ?? (lassoRegion ? lassoSize : null);
+        if (!size) {
             if (overlay.width !== 0) {
                 overlay.width = 0;
                 overlay.height = 0;
@@ -880,20 +980,33 @@ function Dashboard() {
             requestDraw();
             return;
         }
-        const { width, height } = segmentation;
+        const { width, height } = size;
         let data = overlayDataRef.current;
         if (!data || data.width !== width || data.height !== height) {
             data = new ImageData(width, height);
             overlayDataRef.current = data;
         }
-        buildOverlay(segmentation.labels, segmentation.areas, noise, deselected, new Uint32Array(data.data.buffer));
+        const pixels = new Uint32Array(data.data.buffer);
+        if (segmentation) buildOverlay(segmentation.labels, segmentation.areas, noise, deselected, pixels);
+        else pixels.fill(0);
+        if (lassoRegion && lassoRegion.length === width * height) paintOutsideRegion(lassoRegion, pixels);
         if (overlay.width !== width || overlay.height !== height) {
             overlay.width = width;
             overlay.height = height;
         }
-        overlay.getContext("2d")?.putImageData(data, 0, 0);
+        const octx = overlay.getContext("2d");
+        if (octx) {
+            octx.putImageData(data, 0, 0);
+            const image = imageRef.current;
+            if (lassoRegion && image && image.naturalWidth === width && image.naturalHeight === height) {
+                // only where the image has pixels: the empty corners of a mosaic stay clear, as for the water
+                octx.globalCompositeOperation = "destination-in";
+                octx.drawImage(image, 0, 0);
+                octx.globalCompositeOperation = "source-over";
+            }
+        }
         requestDraw();
-    }, [segmentation, noise, deselected, requestDraw]);
+    }, [segmentation, lassoRegion, lassoSize, noise, deselected, requestDraw]);
 
     // Worker errors go to the status bar.
     useEffect(() => {
@@ -901,10 +1014,13 @@ function Dashboard() {
     }, [mask.error]);
 
     // ---- area (O(labels))
-    const pixelCount = useMemo(
-        () => (segmentation ? countSelectedPixels(segmentation.areas, noise, deselected) : null),
-        [segmentation, noise, deselected]
-    );
+    const pixelCount = useMemo(() => {
+        if (!segmentation) return null;
+        if (lassoRegion && lassoRegion.length === segmentation.labels.length) {
+            return countSelectedPixelsInRegion(segmentation.labels, segmentation.areas, noise, deselected, lassoRegion);
+        }
+        return countSelectedPixels(segmentation.areas, noise, deselected);
+    }, [segmentation, noise, deselected, lassoRegion]);
 
     const gsd = gsdTouched ? parseGsd(gsdText) : estimatedGsd;
     const gsdIsEstimate = !gsdTouched && estimatedGsd !== null;
@@ -938,6 +1054,7 @@ function Dashboard() {
     else if (imageLoading || (current && mask.analysing)) areaLabelText = t("dashboard.loadingImage");
     else if (!current) areaLabelText = t("dashboard.imageUnavailable");
     else if (current.maskImageId === 0 || analysisCrashed) areaLabelText = t("dashboard.measuringUnavailable");
+    else if (lassoMode) areaLabelText = t("dashboard.drawLasso");
     else if (picking) areaLabelText = t("dashboard.clickWater");
     else if (refHue === null) areaLabelText = t("dashboard.pickReferenceColour");
     else if (pixelCount === null) areaLabelText = t("dashboard.findingWater");
@@ -992,8 +1109,22 @@ function Dashboard() {
     const worldToStitch = hasWorld && !worldMosaic(project);
     // What is saved is what is selected when the files are written, which can be minutes
     // after the click when the world mosaic has to be stitched first.
-    const measuredRef = useRef({ segmentation, noise, deselected, area, panoramaMtimeMs: panorama?.mtimeMs ?? null });
-    measuredRef.current = { segmentation, noise, deselected, area, panoramaMtimeMs: panorama?.mtimeMs ?? null };
+    const measuredRef = useRef({
+        segmentation,
+        noise,
+        deselected,
+        region: lassoRegion,
+        area,
+        panoramaMtimeMs: panorama?.mtimeMs ?? null,
+    });
+    measuredRef.current = {
+        segmentation,
+        noise,
+        deselected,
+        region: lassoRegion,
+        area,
+        panoramaMtimeMs: panorama?.mtimeMs ?? null,
+    };
 
     const saveFiles = async (kinds: ExportKind[]) => {
         closeDownload();
@@ -1007,7 +1138,8 @@ function Dashboard() {
                 if (!measured.segmentation) throw new Error(t("dashboard.exportNeedsWater"));
                 const { labels, areas, width, height } = measured.segmentation;
                 const waterMask = new Uint8Array(width * height);
-                buildMask(labels, areas, measured.noise, measured.deselected, waterMask);
+                const region = measured.region && measured.region.length === waterMask.length ? measured.region : null;
+                buildMask(labels, areas, measured.noise, measured.deselected, waterMask, region);
                 await stageExportMask(waterMask);
             }
             const result = await exportFiles({
@@ -1083,9 +1215,12 @@ function Dashboard() {
                 return;
             }
             setStatus((s) => (s && s.kind !== "progress" ? null : s));
+            if (hue !== refHue) recordUndo();
             setRefHue(hue);
             setPicking(false);
         } else if (segmentation) {
+            // water outside the lasso is not measured, so there is nothing to (de)select there
+            if (lassoRegion && lassoRegion[p.y * info.width + p.x] !== REGION_INSIDE) return;
             const label = selectableLabelAt(
                 segmentation.labels,
                 segmentation.areas,
@@ -1096,7 +1231,8 @@ function Dashboard() {
                 noise
             );
             if (label !== null) {
-                setDeselection({ segId: segmentation.jobId, labels: toggleLabel(deselected, label) });
+                recordUndo();
+                setDeselection({ segKey: segKey(segmentation), labels: toggleLabel(deselected, label) });
             }
         }
     };
@@ -1108,9 +1244,17 @@ function Dashboard() {
         return { x: clientX - rect.left, y: clientY - rect.top };
     };
 
+    const lassoPointAt = (clientX: number, clientY: number): Point => {
+        const p = localPoint(clientX, clientY);
+        const v = viewRef.current;
+        return { x: (p.x - v.offsetX) / v.scale, y: (p.y - v.offsetY) / v.scale };
+    };
+
     const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
         if (e.button !== 0 || e.ctrlKey) return; // ctrl-click is a context click on macOS
         e.currentTarget.setPointerCapture(e.pointerId);
+        const lassoPress = lassoMode && !!current;
+        lassoDraftRef.current = lassoPress ? [lassoPointAt(e.clientX, e.clientY)] : null;
         dragRef.current = {
             pointerId: e.pointerId,
             startX: e.clientX,
@@ -1118,7 +1262,25 @@ function Dashboard() {
             lastX: e.clientX,
             lastY: e.clientY,
             dragging: false,
+            lasso: lassoPress,
         };
+    };
+
+    /** Ends a lasso press: a drag sets the area to measure, a click removes it. */
+    const finishLasso = (d: DragState, completed: boolean) => {
+        const draft = lassoDraftRef.current;
+        lassoDraftRef.current = null;
+        requestDraw();
+        if (!completed || !displayKey) return;
+        if (!d.dragging) {
+            if (lassoRegion) recordUndo();
+            setLasso(null);
+            setLassoMode(false);
+        } else if (draft && draft.length >= 3 && polygonArea(draft) >= LASSO_MIN_AREA) {
+            recordUndo();
+            setLasso({ key: displayKey, points: draft });
+            setLassoMode(false);
+        }
     };
 
     const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1128,7 +1290,19 @@ function Dashboard() {
             // the button was released where we did not see it (pointerup lost): end the drag
             dragRef.current = null;
             if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
-            if (d.dragging) setDragging(false);
+            if (d.lasso) finishLasso(d, true);
+            else if (d.dragging) setDragging(false);
+            return;
+        }
+        if (d.lasso) {
+            if (!d.dragging && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) >= CLICK_MOVE_THRESHOLD) {
+                d.dragging = true;
+            }
+            if (Math.hypot(e.clientX - d.lastX, e.clientY - d.lastY) < LASSO_POINT_SPACING) return;
+            lassoDraftRef.current?.push(lassoPointAt(e.clientX, e.clientY));
+            d.lastX = e.clientX;
+            d.lastY = e.clientY;
+            requestDraw();
             return;
         }
         if (!d.dragging) {
@@ -1158,7 +1332,8 @@ function Dashboard() {
         if (!d || d.pointerId !== e.pointerId) return;
         dragRef.current = null;
         if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
-        if (d.dragging) setDragging(false);
+        if (d.lasso) finishLasso(d, isClick);
+        else if (d.dragging) setDragging(false);
         else if (isClick) {
             const p = localPoint(e.clientX, e.clientY);
             handleCanvasClickRef.current(p.x, p.y);
@@ -1214,27 +1389,42 @@ function Dashboard() {
     // Keyboard: 0 = fit, +/- = zoom, Escape = leave picking mode.
     const refHueRef = useRef(refHue);
     refHueRef.current = refHue;
+    const lassoModeRef = useRef(lassoMode);
+    lassoModeRef.current = lassoMode;
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
-            if (e.metaKey || e.ctrlKey || e.altKey) return;
             const t = e.target as HTMLElement | null;
+            // text fields keep their own undo; the slider is an input too, but has no text
+            const typing =
+                !!t && (t.tagName === "TEXTAREA" || t.isContentEditable || (t.tagName === "INPUT" && (t as HTMLInputElement).type !== "range"));
+            if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z") {
+                if (typing) return;
+                e.preventDefault();
+                undoRef.current();
+                return;
+            }
+            if (e.metaKey || e.ctrlKey || e.altKey) return;
             if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
             if (e.key === "0") fit();
             else if (e.key === "+" || e.key === "=") zoomBy(1.25);
             else if (e.key === "-" || e.key === "_") zoomBy(0.8);
-            else if (e.key === "Escape" && refHueRef.current !== null) setPicking(false);
+            else if (e.key === "Escape" && lassoModeRef.current) {
+                lassoDraftRef.current = null;
+                setLassoMode(false);
+                requestDraw();
+            } else if (e.key === "Escape" && refHueRef.current !== null) setPicking(false);
             else return;
             e.preventDefault();
         };
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
-    }, [fit, zoomBy]);
+    }, [fit, zoomBy, requestDraw]);
 
     const canvasCursor = dragging
         ? "grabbing"
         : !current
           ? "default"
-          : picking
+          : picking || lassoMode
             ? "crosshair"
             : segmentation
               ? "pointer"
@@ -1598,15 +1788,42 @@ function Dashboard() {
                             <span className="view-toggle-thumb" aria-hidden="true"></span>
                         </div>
                     )}
-                    <div
-                        className={`color-picker${picking ? " active" : ""}`}
-                        id="color-picker"
-                        role="button"
-                        aria-pressed={picking}
-                        title={t("dashboard.newColourHint")}
-                        onClick={() => setPicking((active) => !active)}
-                    >
-                        <img src={EyedropperIcon21px} alt={t("dashboard.colourPicker")} />
+                    <div className="tool-group" role="group" aria-label={t("dashboard.tools")}>
+                        <button
+                            type="button"
+                            className={`tool-button${picking ? " active" : ""}`}
+                            id="color-picker"
+                            aria-pressed={picking}
+                            title={t("dashboard.newColourHint")}
+                            onClick={() => {
+                                if (!picking) setLassoMode(false);
+                                setPicking(!picking);
+                            }}
+                        >
+                            <img src={EyedropperIcon21px} alt={t("dashboard.colourPicker")} />
+                        </button>
+                        <button
+                            type="button"
+                            className={`tool-button lasso-tool${lassoMode ? " active" : ""}`}
+                            aria-pressed={lassoMode}
+                            title={t("dashboard.lassoHint")}
+                            onClick={() => {
+                                if (!lassoMode) setPicking(false);
+                                setLassoMode(!lassoMode);
+                            }}
+                        >
+                            <img src={LassoIcon21px} alt={t("dashboard.lasso")} />
+                        </button>
+                        <span className="tool-divider" aria-hidden="true" />
+                        <button
+                            type="button"
+                            className="tool-button undo-button"
+                            disabled={history.length === 0}
+                            title={t("dashboard.undoHint")}
+                            onClick={undo}
+                        >
+                            <img src={Undo21px} alt={t("dashboard.undo")} />
+                        </button>
                     </div>
                     <div className="slider-container" title={t("dashboard.toleranceHint")}>
                         <input
@@ -1617,7 +1834,15 @@ function Dashboard() {
                             className="slider"
                             id="hsvValue"
                             value={tolerance}
-                            onChange={(e) => setTolerance(Number(e.target.value))}
+                            onChange={(e) => {
+                                // one drag (or one key press) is one undo step
+                                if (!toleranceStepRef.current) recordUndo();
+                                toleranceStepRef.current = true;
+                                setTolerance(Number(e.target.value));
+                            }}
+                            onPointerUp={() => (toleranceStepRef.current = false)}
+                            onKeyUp={() => (toleranceStepRef.current = false)}
+                            onBlur={() => (toleranceStepRef.current = false)}
                         />
                         <span className="slider-value">±{tolerance}</span>
                     </div>
