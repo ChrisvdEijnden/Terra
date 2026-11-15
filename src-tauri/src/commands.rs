@@ -310,12 +310,8 @@ pub async fn open_recent(app: AppHandle, id: String) -> Result<ProjectState, Str
 
 /// Names of the files an export would replace.
 #[tauri::command]
-pub async fn export_conflicts(
-    app: AppHandle,
-    kinds: Vec<ExportKind>,
-    fallback_name: String,
-) -> Result<Vec<String>, String> {
-    blocking(move || export::conflicts(&app, &kinds, &fallback_name)).await
+pub async fn export_conflicts(app: AppHandle, kinds: Vec<ExportKind>) -> Result<Vec<String>, String> {
+    blocking(move || export::conflicts(&app, &kinds)).await
 }
 
 /// Takes the water mask (one byte per panorama pixel) ahead of export_files, as raw

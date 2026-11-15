@@ -31,3 +31,6 @@ __pycache__/
 # Stitcher output from older builds (now written to the app data folder)
 src/lib/panorama.png
 src/lib/selected_images.json
+
+# Local preview setup for Claude Code sessions (machine-specific paths)
+.claude/launch.json

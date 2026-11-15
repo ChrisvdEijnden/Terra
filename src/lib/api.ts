@@ -134,8 +134,6 @@ export type ExportKind = "thermal" | "world" | "polygon" | "area";
 
 export interface ExportRequest {
     kinds: ExportKind[];
-    /** The name to use while the project has none. */
-    fallbackName: string;
     areaHectares: number | null;
     panoramaMtimeMs: number | null;
 }
@@ -147,8 +145,7 @@ export interface ExportResult {
 }
 
 /** Names of the files an export would replace. */
-export const exportConflicts = (kinds: ExportKind[], fallbackName: string): Promise<string[]> =>
-    invoke<string[]>("export_conflicts", { kinds, fallbackName });
+export const exportConflicts = (kinds: ExportKind[]): Promise<string[]> => invoke<string[]>("export_conflicts", { kinds });
 
 /** Hands over the water mask (one byte per panorama pixel) ahead of exportFiles. */
 export const stageExportMask = (mask: Uint8Array): Promise<void> => invoke<void>("stage_export_mask", mask);

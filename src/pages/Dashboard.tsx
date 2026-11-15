@@ -1172,7 +1172,6 @@ function Dashboard() {
             }
             const result = await exportFiles({
                 kinds,
-                fallbackName: t("dashboard.untitled"),
                 areaHectares: measured.area,
                 panoramaMtimeMs: measured.panoramaMtimeMs,
             });
@@ -1186,7 +1185,7 @@ function Dashboard() {
 
     const startDownload = async (kinds: ExportKind[]) => {
         try {
-            const files = await exportConflicts(kinds, t("dashboard.untitled"));
+            const files = await exportConflicts(kinds);
             if (files.length > 0) setReplacePrompt({ kinds, files });
             else await saveFiles(kinds);
         } catch (err) {

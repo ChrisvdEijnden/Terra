@@ -37,8 +37,6 @@ pub enum ExportKind {
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub kinds: Vec<ExportKind>,
-    /// The name to use while the project has none (the UI's translation of "Untitled").
-    pub fallback_name: String,
     pub area_hectares: Option<f64>,
     /// The panorama the mask and the area were measured on.
     pub panorama_mtime_ms: Option<u64>,
@@ -70,15 +68,10 @@ fn checked_area(area: Option<f64>) -> Result<f64, String> {
         .ok_or_else(|| "There is no area to save yet".to_string())
 }
 
-fn project_name(dir: &Path, fallback: &str) -> String {
-    project::load_name(dir).unwrap_or_else(|| {
-        let name = project::sanitize_project_name(fallback);
-        if name.is_empty() {
-            DEFAULT_PROJECT.to_string()
-        } else {
-            name
-        }
-    })
+/// The stored name, or one fixed name for every unnamed project (not translated, so the
+/// folder does not change with the language of the app).
+fn project_name(dir: &Path) -> String {
+    project::load_name(dir).unwrap_or_else(|| DEFAULT_PROJECT.to_string())
 }
 
 fn project_folder(app: &AppHandle, project: &str) -> Result<PathBuf, String> {
@@ -89,12 +82,8 @@ fn project_folder(app: &AppHandle, project: &str) -> Result<PathBuf, String> {
     Ok(documents.join(ROOT_FOLDER).join(project))
 }
 
-pub fn conflicts(
-    app: &AppHandle,
-    kinds: &[ExportKind],
-    fallback: &str,
-) -> Result<Vec<String>, String> {
-    let project = project_name(&data_dir(app)?, fallback);
+pub fn conflicts(app: &AppHandle, kinds: &[ExportKind]) -> Result<Vec<String>, String> {
+    let project = project_name(&data_dir(app)?);
     let folder = project_folder(app, &project)?;
     Ok(kinds
         .iter()
@@ -202,7 +191,7 @@ fn export(app: &AppHandle, dir: &Path, request: &ExportRequest) -> Result<Export
         return Err("Nothing to save".into());
     }
     let wants = |kind| request.kinds.contains(&kind);
-    let project = project_name(dir, &request.fallback_name);
+    let project = project_name(dir);
     let folder = project_folder(app, &project)?;
     let path_of = |kind| folder.join(file_name(kind, &project));
     let photos = project::load_project(dir);
@@ -249,6 +238,7 @@ fn export(app: &AppHandle, dir: &Path, request: &ExportRequest) -> Result<Export
     };
 
     fs::create_dir_all(&folder).map_err(|e| format!("the folder could not be created ({e})"))?;
+    remove_leftovers(&folder);
 
     if !orthomosaics.is_empty() || polygon.is_some() {
         let job_path = dir.join(JOB_FILE);
@@ -273,6 +263,24 @@ fn export(app: &AppHandle, dir: &Path, request: &ExportRequest) -> Result<Export
             .map(|kind| file_name(*kind, &project))
             .collect(),
     })
+}
+
+/// Removes the hidden temporary files an export leaves in `folder` when it is killed
+/// (the app quit while saving): `.tmp-*` from terra_export.py, `.<name>.tmp-*` from
+/// project::write_atomic. Only one export runs at a time, so none of them is in use.
+fn remove_leftovers(folder: &Path) {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let leftover = name
+            .to_str()
+            .is_some_and(|n| n.starts_with('.') && n.contains(".tmp-"));
+        if leftover && entry.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Runs a whole export (blocking). Called on a blocking thread by the command.
@@ -357,15 +365,32 @@ mod tests {
     }
 
     #[test]
-    fn stored_name_wins_over_the_fallback() {
+    fn leftovers_of_a_killed_export_are_removed() {
+        let dir = std::env::temp_dir().join(format!("terra-leftovers-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let keep = ["orthomosaic_Polder_T.tif", ".DS_Store", "notes.tmp-1.txt"];
+        let gone = [".tmp-k2j4h1", ".hectare_Polder.txt.tmp-123-0"];
+        for name in keep.iter().chain(&gone) {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+        remove_leftovers(&dir);
+        for name in keep {
+            assert!(dir.join(name).exists(), "{name} kept");
+        }
+        for name in gone {
+            assert!(!dir.join(name).exists(), "{name} removed");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unnamed_projects_share_one_fixed_name() {
         let dir = std::env::temp_dir().join(format!("terra-export-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let _ = fs::remove_file(dir.join(project::PROJECT_NAME_FILE));
-        assert_eq!(project_name(&dir, "Naamloos"), "Naamloos");
-        assert_eq!(project_name(&dir, " ../ "), "-");
-        assert_eq!(project_name(&dir, "..."), DEFAULT_PROJECT);
+        assert_eq!(project_name(&dir), DEFAULT_PROJECT);
         project::save_name(&dir, "Polder").unwrap();
-        assert_eq!(project_name(&dir, "Naamloos"), "Polder");
+        assert_eq!(project_name(&dir), "Polder");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
