@@ -8,6 +8,7 @@ import {
     baseName,
     cancelStitch,
     clearProject,
+    deleteProject,
     errorMessage,
     exportConflicts,
     exportFiles,
@@ -341,6 +342,9 @@ function Dashboard() {
     // ---- recent projects (under the project name)
     const [recentOpen, setRecentOpen] = useState(false);
     const [recent, setRecent] = useState<RecentProject[] | null>(null); // null while loading
+    /** The project whose delete button was clicked once and waits for the second click. */
+    const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+    const deleteTimerRef = useRef<number | null>(null);
     const recentMenuRef = useRef<HTMLDivElement | null>(null);
 
     // ---- a notice that was closed stays closed until it says something else
@@ -562,7 +566,7 @@ function Dashboard() {
         [applyProject, cancelClearConfirm, clearStatus, showError, startProject]
     );
 
-    const openPhotos = useCallback(() => openWith(() => pickImages("replace")), [openWith]);
+    const openPhotos = useCallback(() => openWith(() => pickImages()), [openWith]);
 
     const openFolder = useCallback(
         () =>
@@ -591,11 +595,35 @@ function Dashboard() {
         }
         setRecentOpen(true);
         setRecent(null);
+        setConfirmDelete(null);
         recentProjects().then(setRecent, (err) => {
             setRecentOpen(false);
             showError(t("dashboard.recentFailed", { error: errorMessage(err) }));
         });
     }, [recentOpen, showError, t]);
+
+    /** First click arms the button, a second one within a few seconds deletes the project. */
+    const deleteRecent = useCallback(
+        async (id: string) => {
+            if (deleteTimerRef.current !== null) window.clearTimeout(deleteTimerRef.current);
+            deleteTimerRef.current = null;
+            if (confirmDelete !== id) {
+                setConfirmDelete(id);
+                deleteTimerRef.current = window.setTimeout(() => {
+                    deleteTimerRef.current = null;
+                    setConfirmDelete(null);
+                }, CLEAR_CONFIRM_MS);
+                return;
+            }
+            setConfirmDelete(null);
+            try {
+                setRecent(await deleteProject(id));
+            } catch (err) {
+                showError(t("dashboard.deleteProjectFailed", { error: errorMessage(err) }));
+            }
+        },
+        [confirmDelete, showError, t]
+    );
 
     const pickRecent = useCallback(
         (id: string) => {
@@ -1529,11 +1557,8 @@ function Dashboard() {
                                 ) : (
                                     <div className="recent-list">
                                         {recent.map((item) => (
-                                            <button
-                                                key={item.id}
-                                                className="download-item"
-                                                onClick={() => void pickRecent(item.id)}
-                                            >
+                                            <div key={item.id} className="recent-row">
+                                            <button className="download-item" onClick={() => void pickRecent(item.id)}>
                                                 <span className="recent-name">{item.name ?? t("dashboard.untitled")}</span>
                                                 <small>
                                                     {[
@@ -1550,6 +1575,21 @@ function Dashboard() {
                                                         .join(" · ")}
                                                 </small>
                                             </button>
+                                            <button
+                                                type="button"
+                                                className={`recent-delete${confirmDelete === item.id ? " confirm" : ""}`}
+                                                onClick={() => void deleteRecent(item.id)}
+                                                title={
+                                                    confirmDelete === item.id
+                                                        ? t("dashboard.deleteProjectConfirmHint")
+                                                        : t("dashboard.deleteProject")
+                                                }
+                                                aria-label={t("dashboard.deleteProject")}
+                                            >
+                                                <span className="icon-mask" style={maskIcon(Trash21px)} aria-hidden="true" />
+                                                {confirmDelete === item.id && <span>{t("dashboard.deleteProjectConfirm")}</span>}
+                                            </button>
+                                            </div>
                                         ))}
                                     </div>
                                 )}

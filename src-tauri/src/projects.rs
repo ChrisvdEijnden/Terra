@@ -241,6 +241,17 @@ pub fn remove_if_empty(dir: &Path) {
     }
 }
 
+/// Deletes a kept project and its mosaics. The open project cannot be deleted.
+pub fn delete(root: &Path, id: &str) -> io::Result<()> {
+    if !valid_id(id) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad project id"));
+    }
+    if current_id(root).as_deref() == Some(id) {
+        return Err(io::Error::other("that project is open"));
+    }
+    fs::remove_dir_all(project_dir(root, id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +354,26 @@ mod tests {
         assert!(!project_dir(&root, &empty).exists());
         assert!(set_current(&root, &empty).is_err(), "gone");
         assert!(set_current(&root, "../x").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn kept_projects_can_be_deleted_but_not_the_open_one() {
+        let root = temp_root("delete");
+        let kept = create(&root).unwrap();
+        project::save_project(&project_dir(&root, &kept), &photos(&["a", "b"])).unwrap();
+        let open = create(&root).unwrap();
+        set_current(&root, &open).unwrap();
+
+        assert!(delete(&root, &open).is_err(), "open");
+        assert!(project_dir(&root, &open).is_dir());
+        assert!(delete(&root, "..").is_err(), "outside the projects folder");
+        assert!(root.join(PROJECTS_DIR).is_dir());
+
+        delete(&root, &kept).unwrap();
+        assert!(!project_dir(&root, &kept).exists());
+        assert!(list(&root).is_empty());
+        assert!(delete(&root, &kept).is_err(), "already gone");
         fs::remove_dir_all(root).unwrap();
     }
 }

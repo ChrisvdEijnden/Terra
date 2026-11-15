@@ -52,8 +52,6 @@ export interface ProjectState {
     stitching: StitchTarget | null;
 }
 
-export type PickMode = "replace" | "add";
-
 /** One flight in a picked folder, with its number of photos per camera. */
 export interface FlightSummary {
     label: string;
@@ -74,8 +72,7 @@ export interface StitchLogPayload {
 export const getProject = (): Promise<ProjectState> => invoke<ProjectState>("get_project");
 
 /** Opens the native file dialog (from Rust). Resolves null when the dialog is cancelled. */
-export const pickImages = (mode: PickMode): Promise<ProjectState | null> =>
-    invoke<ProjectState | null>("pick_images", { mode });
+export const pickImages = (): Promise<ProjectState | null> => invoke<ProjectState | null>("pick_images");
 
 /**
  * Opens the native folder dialog (from Rust) and makes a project of the photos in the
@@ -125,6 +122,9 @@ export interface RecentProject {
 
 /** The other projects with photos, most recently opened first. */
 export const recentProjects = (): Promise<RecentProject[]> => invoke<RecentProject[]>("recent_projects");
+
+/** Deletes a project from the recent list, mosaics and all; resolves to the list without it. */
+export const deleteProject = (id: string): Promise<RecentProject[]> => invoke<RecentProject[]>("delete_project", { id });
 
 /** Opens a project from the recent list, mosaics and all. */
 export const openRecent = (id: string): Promise<ProjectState> => invoke<ProjectState>("open_recent", { id });

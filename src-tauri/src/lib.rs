@@ -145,6 +145,7 @@ pub fn run() {
             commands::export_files,
             commands::recent_projects,
             commands::open_recent,
+            commands::delete_project,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

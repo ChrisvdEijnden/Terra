@@ -3,25 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::export::{self, ExportKind, ExportRequest, ExportResult};
-use crate::project::{self, Kind, Project, ProjectState, StitchTarget};
+use crate::project::{self, Project, ProjectState, StitchTarget};
 use crate::projects::{self, RecentProject};
 use crate::scan::{self, Flight, FlightSummary, IMAGE_EXTENSIONS};
 use crate::{app_dir, data_dir, lock, project_state, stitch, switch_project, AppState};
 
 const BUSY: &str = "Wait for the current stitch to finish";
 const EXPORTING: &str = "Wait for the export to finish";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PickMode {
-    Replace,
-    Add,
-}
 
 /// The flights found in the folder that was picked last, until one of them is opened.
 pub struct PendingFlights {
@@ -129,7 +122,6 @@ pub async fn get_project(app: AppHandle) -> Result<ProjectState, String> {
 pub async fn pick_images(
     app: AppHandle,
     window: WebviewWindow,
-    mode: PickMode,
 ) -> Result<Option<ProjectState>, String> {
     if app.state::<AppState>().stitch.is_running() {
         return Err(BUSY.into());
@@ -155,35 +147,12 @@ pub async fn pick_images(
         }
 
         let (thermal, world) = scan::sort_photos(picked);
-        match mode {
-            PickMode::Replace => {
-                let project = Project::new(
-                    project::dedupe_and_sort(thermal),
-                    project::dedupe_and_sort(world),
-                );
-                let name = scan::name_for_photos(&project.images);
-                open_project(&app, &project, name.as_deref())?;
-            }
-            PickMode::Add => {
-                let state = app.state::<AppState>();
-                let dir = data_dir(&app)?;
-                let _project = lock(&state.project_lock);
-                if state.stitch.is_running() {
-                    return Err(BUSY.into());
-                }
-                let current = project::load_project(&dir);
-                let (had_thermal, had_world) = match current.kind {
-                    Kind::Thermal => (current.images, current.world_images),
-                    Kind::World => (Vec::new(), current.images),
-                };
-                let merged = |had: Vec<String>, picked: Vec<PathBuf>| {
-                    project::dedupe_and_sort(had.into_iter().map(PathBuf::from).chain(picked))
-                };
-                let project = Project::new(merged(had_thermal, thermal), merged(had_world, world));
-                project::save_project(&dir, &project)
-                    .map_err(|e| format!("Could not save the image list: {e}"))?;
-            }
-        }
+        let project = Project::new(
+            project::dedupe_and_sort(thermal),
+            project::dedupe_and_sort(world),
+        );
+        let name = scan::name_for_photos(&project.images);
+        open_project(&app, &project, name.as_deref())?;
         Ok(Some(project_state(&app)))
     })
     .await
@@ -292,18 +261,34 @@ pub async fn set_project_name(app: AppHandle, name: String) -> Result<ProjectSta
 }
 
 /// The other projects with photos, most recently opened first.
+fn recent_list(app: &AppHandle) -> Result<Vec<RecentProject>, String> {
+    let current = data_dir(app)?;
+    let current = current
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut recent = projects::list(&app_dir(app)?);
+    recent.retain(|p| p.id != current);
+    Ok(recent)
+}
+
 #[tauri::command]
 pub async fn recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
+    blocking(move || recent_list(&app)).await
+}
+
+/// Deletes a project from the recent list, mosaics and all; returns the list without it.
+#[tauri::command]
+pub async fn delete_project(app: AppHandle, id: String) -> Result<Vec<RecentProject>, String> {
     blocking(move || {
-        let current = data_dir(&app)?;
-        let current = current
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let mut recent = projects::list(&app_dir(&app)?);
-        recent.retain(|p| p.id != current);
-        Ok(recent)
+        let state = app.state::<AppState>();
+        {
+            let _project = lock(&state.project_lock);
+            projects::delete(&app_dir(&app)?, &id)
+                .map_err(|e| format!("Could not delete that project: {e}"))?;
+        }
+        recent_list(&app)
     })
     .await
 }
