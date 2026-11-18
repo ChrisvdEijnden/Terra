@@ -170,12 +170,15 @@ body {
     gap: 2px;
 }
 
-.right-system-actions .icon-mask {
+.right-system-actions > button .icon-mask,
+.right-system-actions > div > button .icon-mask {
     width: 20px;
     height: 20px;
 }
 
-.right-system-actions button {
+/* The bar's own icon buttons (not the buttons inside its menus) */
+.right-system-actions > button,
+.right-system-actions > div > button {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -195,23 +198,27 @@ body {
     transition: background-color 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
 }
 
-.right-system-actions button:hover:not(:disabled),
-.right-system-actions button.open {
+.right-system-actions > button:hover:not(:disabled),
+.right-system-actions > div > button:hover:not(:disabled),
+.right-system-actions > div > button.open {
     background-color: var(--color-bg-app);
     color: var(--color-text-primary);
 }
 
-.right-system-actions button:active:not(:disabled) {
+.right-system-actions > button:active:not(:disabled),
+.right-system-actions > div > button:active:not(:disabled) {
     transform: scale(0.92);
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .right-system-actions button:active:not(:disabled) {
+    .right-system-actions > button:active:not(:disabled),
+    .right-system-actions > div > button:active:not(:disabled) {
         transform: none;
     }
 }
 
-.right-system-actions button:disabled {
+.right-system-actions > button:disabled,
+.right-system-actions > div > button:disabled {
     opacity: 0.4;
     cursor: default;
 }
