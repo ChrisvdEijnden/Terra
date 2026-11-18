@@ -82,6 +82,27 @@ fn project_folder(app: &AppHandle, project: &str) -> Result<PathBuf, String> {
     Ok(documents.join(ROOT_FOLDER).join(project))
 }
 
+/// Shows this project's export folder in Finder (Explorer, or the file manager on Linux).
+/// The folder comes from the project, never from the frontend.
+pub fn reveal(app: &AppHandle) -> Result<(), String> {
+    let folder = project_folder(app, &project_name(&data_dir(app)?))?;
+    if !folder.is_dir() {
+        return Err("nothing has been exported yet".into());
+    }
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(&folder)
+        .status()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn conflicts(app: &AppHandle, kinds: &[ExportKind]) -> Result<Vec<String>, String> {
     let project = project_name(&data_dir(app)?);
     let folder = project_folder(app, &project)?;

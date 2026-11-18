@@ -335,6 +335,11 @@ pub async fn export_files(app: AppHandle, request: ExportRequest) -> Result<Expo
     blocking(move || export::run(&app, &request)).await
 }
 
+#[tauri::command]
+pub async fn reveal_export_folder(app: AppHandle) -> Result<(), String> {
+    blocking(move || export::reveal(&app)).await
+}
+
 /// Stitches the panorama, or with target "world" the world mosaic that goes with it.
 #[tauri::command]
 pub async fn stitch_images(

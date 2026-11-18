@@ -12,42 +12,104 @@
     transition: background-color 0.2s ease;
 }
 
-.area, .gsd, .noise {
+/* ---- Top bar: noise, GSD and the area result */
+
+.gsd, .noise, .area {
     box-sizing: border-box;
-    width: fit-content;
     height: 30px;
     display: flex;
     flex-direction: row;
-    justify-content: center;
     align-items: center;
     padding: 0 12px;
     border-radius: 8px;
-    border: none;
+    font-family: "Figtree", sans-serif;
+    font-size: 0.8125rem;
+    white-space: nowrap;
     flex-shrink: 0;
 }
 
+.gsd, .noise {
+    gap: 4px;
+    background-color: var(--color-bg-surface);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border);
+    cursor: text;
+    transition: border-color 0.15s ease;
+}
+
+.gsd:focus-within, .noise:focus-within {
+    border-color: var(--color-brand);
+}
+
+.field-label {
+    margin-right: 4px;
+    color: var(--color-text-secondary);
+}
+
+.gsd input, .noise input {
+    min-width: 2ch;
+    padding: 0;
+    border: none;
+    outline: none;
+    background-color: transparent;
+    font: inherit;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-primary);
+}
+
+.gsd input::placeholder, .noise input::placeholder {
+    color: var(--color-text-tertiary);
+}
+
+.unit {
+    color: var(--color-text-tertiary);
+}
+
+.gsd-estimate {
+    margin-left: 4px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background-color: var(--color-brand-subtle-bg);
+    color: var(--color-brand-accent);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    cursor: help;
+}
+
+/* The one number the app is for: a quiet readout, never cut off first */
 .area {
     justify-content: center;
-    align-content: center;
     gap: 8px;
-    max-width: 300px;
-    min-width: 0;
-    flex-shrink: 1;
-    background-color: var(--color-brand);
-    color: var(--color-on-brand);
-    border-radius: 999px;
+    min-width: 10rem;
+    margin: 0;
+    background-color: var(--color-brand-subtle-bg);
+    border: 1px solid transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.area:hover:not(:disabled) {
+    border-color: var(--color-brand);
+}
+
+.area:disabled {
+    background-color: var(--color-bg-surface);
+    border-color: var(--color-border);
     cursor: default;
 }
 
-.area.copyable {
-    cursor: pointer;
+.area-value {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-primary);
 }
 
-.area p {
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    min-width: 0;
+.area:disabled .area-value {
+    font-weight: 600;
+    color: var(--color-text-tertiary);
 }
 
 .area-warning {
@@ -60,66 +122,21 @@
     border-radius: 50%;
     background-color: var(--color-warning-subtle-bg);
     color: var(--color-warning);
-    font-family: "Figtree", sans-serif;
-    font-size: 11px;
+    font-size: 0.6875rem;
     font-weight: 800;
     line-height: 1;
     cursor: help;
 }
 
-.gsd, .noise {
-    background-color: var(--color-bg-surface);
-    color: var(--color-text-primary);
-    border: 2px solid var(--color-border);
+/* Narrow windows: the field labels go first (their tooltip and screen reader label stay) */
+@media (max-width: 1100px) {
+    .gsd .field-label, .noise .field-label {
+        display: none;
+    }
 }
 
-.gsd input, .noise input {
-    font-size: 13px;
-    font-family: "Figtree", sans-serif;
-    padding: 4px;
-    border: none;
-    font-weight: 600;
-    outline: none;
-    text-align: left;
-    color: var(--color-text-secondary);
-    width: 70px;
-    background-color: transparent;
-}
+/* ---- Floating controls at the bottom of the canvas */
 
-.noise input {
-    width: 55px;
-}
-
-.gsd-estimate {
-    margin-left: 6px;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background-color: var(--color-brand-subtle-bg);
-    color: var(--color-brand-accent);
-    font-size: 11px;
-    font-weight: 600;
-    cursor: help;
-}
-
-.area p, .gsd p, .noise p {
-    display: flex;
-    align-items: center;
-    font-size: 13px;
-    font-weight: 400;
-    font-family: "Figtree", sans-serif;
-    margin: 0;
-    white-space: nowrap;
-}
-
-.area p {
-    display: block;
-}
-
-.area strong {
-    font-weight: 600;
-}
-
-/* Floating controls at the bottom of the canvas */
 .controls {
     display: flex;
     flex-direction: row;
@@ -137,35 +154,39 @@
     pointer-events: auto;
 }
 
-/* Thermal / World switch: same pill as the other controls, the thumb marks the view */
+.view-toggle, .tool-group, .slider-container, .download-button {
+    box-sizing: border-box;
+    flex-shrink: 0;
+    height: 34px;
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 17px;
+    box-shadow: 0 2px 8px var(--color-shadow);
+}
+
+/* Thermal / Photo switch: the thumb marks the view */
 .view-toggle {
     position: relative;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    flex-shrink: 0;
-    box-sizing: border-box;
-    height: 30px;
     padding: 2px;
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 15px;
 }
 
 .view-toggle-option {
     position: relative;
     z-index: 1;
     margin: 0;
-    padding: 0 12px;
+    padding: 0 14px;
     background-color: transparent;
     border: none;
     border-radius: 999px;
     cursor: pointer;
     font-family: "Figtree", sans-serif;
-    font-size: 12px;
+    font-size: 0.75rem;
     font-weight: 600;
     color: var(--color-text-secondary);
     white-space: nowrap;
-    transition: color 0.15s ease, opacity 0.15s ease;
+    transition: color 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
 }
 
 .view-toggle-option[aria-checked="true"] {
@@ -175,11 +196,6 @@
 .view-toggle-option:disabled {
     opacity: 0.4;
     cursor: default;
-}
-
-.view-toggle-option:focus-visible {
-    outline: 2px solid var(--color-brand-accent);
-    outline-offset: 1px;
 }
 
 .view-toggle-thumb {
@@ -192,7 +208,7 @@
     background-color: var(--color-brand-subtle-bg);
     border: 1px solid var(--color-brand);
     border-radius: 999px;
-    transition: transform 0.2s ease;
+    transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .view-toggle[data-active="world"] .view-toggle-thumb {
@@ -204,13 +220,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    flex-shrink: 0;
-    box-sizing: border-box;
-    height: 30px;
     padding: 2px;
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 15px;
 }
 
 .tool-button {
@@ -218,15 +228,16 @@
     align-items: center;
     justify-content: center;
     box-sizing: border-box;
-    width: 24px;
-    height: 24px;
+    width: 28px;
+    height: 28px;
     margin: 0;
     padding: 0;
     background-color: transparent;
     border: 1px solid transparent;
     border-radius: 999px;
+    color: var(--color-text-secondary);
     cursor: pointer;
-    transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
 }
 
 .tool-button:hover:not(:disabled):not(.active) {
@@ -236,6 +247,7 @@
 .tool-button.active {
     background-color: var(--color-brand-subtle-bg);
     border-color: var(--color-brand);
+    color: var(--color-brand-accent);
 }
 
 .tool-button:disabled {
@@ -243,12 +255,7 @@
     cursor: default;
 }
 
-.tool-button:focus-visible {
-    outline: 2px solid var(--color-brand-accent);
-    outline-offset: 1px;
-}
-
-.tool-button img {
+.tool-button .icon-mask, .download-button .icon-mask {
     width: 18px;
     height: 18px;
 }
@@ -262,39 +269,17 @@
 
 .slider-container {
     display: flex;
-    gap: 8px;
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    height: 30px;
-    width: 250px;
-    padding: 0 10px 0 8px;
-    border-radius: 15px;
     align-items: center;
-    justify-content: center;
-}
-
-.slider-value {
-    min-width: 26px;
-    font-family: "Figtree", sans-serif;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    text-align: right;
+    width: 220px;
+    padding: 0 12px;
 }
 
 .slider {
-    border-radius: 15px;
     width: 100%;
-    height: 25px;
-    outline: none;
+    height: 24px;
+    margin: 0;
     accent-color: var(--color-brand);
-    opacity: 0.8;
-    -webkit-transition: .2s;
-    transition: opacity .2s;
-}
-
-.slider:hover {
-    opacity: 1;
+    cursor: pointer;
 }
 
 .download-menu {
@@ -305,24 +290,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 30px;
-    height: 30px;
+    width: 34px;
     padding: 0;
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 15px;
+    color: var(--color-text-secondary);
     cursor: pointer;
-    transition: background-color 0.15s ease, border-color 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
 
-.download-button img {
-    width: 18px;
-    height: 18px;
+.download-button:hover:not(:disabled) {
+    background-color: var(--color-bg-app);
 }
 
 .download-button.open {
     background-color: var(--color-brand-subtle-bg);
     border-color: var(--color-brand);
+    color: var(--color-brand-accent);
 }
 
 .download-button:disabled {
@@ -330,22 +312,56 @@
     cursor: default;
 }
 
-/* Opens upwards from the button, right edges aligned */
-.download-popover {
-    position: absolute;
-    right: 0;
-    bottom: calc(100% + 8px);
-    z-index: 10;
+/* ---- Pop-up menus: they grow out of the button that opened them and shrink back into it */
+
+.popover {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    width: 260px;
     padding: 6px;
     background-color: var(--color-bg-surface);
     border: 1px solid var(--color-border);
     border-radius: 12px;
     box-shadow: 0 8px 24px var(--color-shadow);
     font-family: "Figtree", sans-serif;
+    animation: popover-enter 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.popover-exit {
+    animation: popover-exit 0.12s cubic-bezier(0.8, 0.2, 0.8, 0) forwards;
+    pointer-events: none;
+}
+
+@keyframes popover-enter {
+    from {
+        opacity: 0;
+        transform: scale(0.94);
+    }
+}
+
+@keyframes popover-exit {
+    to {
+        opacity: 0;
+        transform: scale(0.94);
+    }
+}
+
+/* Title row of a menu */
+.popover-header {
+    padding: 4px 10px 6px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+}
+
+/* Opens upwards from the export button, right edges aligned */
+.download-popover {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    z-index: 10;
+    width: 260px;
+    transform-origin: bottom right;
 }
 
 .download-item {
@@ -359,15 +375,20 @@
     border: none;
     border-radius: 8px;
     font: inherit;
-    font-size: 13px;
+    font-size: 0.8125rem;
     font-weight: 500;
     color: var(--color-text-primary);
     text-align: left;
     cursor: pointer;
+    transition: background-color 0.1s ease;
 }
 
 .download-item:hover:not(:disabled) {
     background-color: var(--color-brand-subtle-bg);
+}
+
+.download-item:active:not(:disabled) {
+    background-color: var(--color-border);
 }
 
 .download-item:disabled {
@@ -376,8 +397,14 @@
 }
 
 .download-item small {
-    font-size: 11px;
+    font-size: 0.6875rem;
     font-weight: 400;
+    letter-spacing: 0.01em;
+    color: var(--color-text-secondary);
+}
+
+.download-item:disabled small {
+    color: var(--color-text-tertiary);
 }
 
 .download-item.all {
@@ -389,14 +416,24 @@
     color: var(--color-text-tertiary);
 }
 
-/* The same list under the Open button in the top bar: opens downwards */
-.open-menu {
-    position: relative;
-    display: flex;
+/* Clear project: red, and red-filled while it waits for the second click */
+.download-item.danger {
+    color: var(--color-danger);
 }
 
-.open-menu > button.open {
-    background-color: var(--color-bg-app);
+.download-item.danger:hover:not(:disabled),
+.download-item.danger.confirm {
+    background-color: var(--color-danger-subtle-bg);
+}
+
+.download-item.danger:disabled {
+    color: var(--color-text-tertiary);
+}
+
+/* The open list under the folder button: opens downwards */
+.open-menu, .settings-menu {
+    position: relative;
+    display: flex;
 }
 
 .open-popover {
@@ -404,16 +441,8 @@
     top: calc(100% + 8px);
     right: 0;
     z-index: 20;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
     width: 270px;
-    padding: 6px;
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    box-shadow: 0 8px 24px var(--color-shadow);
-    font-family: "Figtree", sans-serif;
+    transform-origin: top right;
 }
 
 /* stronger than the top bar's own button rules */
@@ -425,17 +454,9 @@
     min-width: 0;
     height: auto;
     padding: 7px 10px;
-    font-size: 13px;
+    font-size: 0.8125rem;
     font-weight: 500;
     color: var(--color-text-primary);
-}
-
-.open-popover .download-item small {
-    color: var(--color-text-secondary);
-}
-
-.open-popover .download-item:hover:not(:disabled) {
-    background-color: var(--color-brand-subtle-bg);
 }
 
 .download-divider {
@@ -453,7 +474,7 @@
 
 .download-confirm p {
     margin: 0;
-    font-size: 13px;
+    font-size: 0.8125rem;
     font-weight: 600;
     color: var(--color-text-primary);
 }
@@ -462,7 +483,7 @@
     margin: 0;
     padding: 0;
     list-style: none;
-    font-size: 12px;
+    font-size: 0.75rem;
     color: var(--color-text-secondary);
 }
 
@@ -478,17 +499,23 @@
     gap: 6px;
 }
 
-.download-confirm-actions button {
+.download-confirm-actions button, .flight-chooser .cancel, .status-action {
     height: 28px;
     padding: 0 12px;
     background-color: transparent;
     border: 1px solid var(--color-border);
     border-radius: 8px;
     font: inherit;
-    font-size: 12px;
+    font-size: 0.75rem;
     font-weight: 600;
     color: var(--color-text-secondary);
     cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+
+.download-confirm-actions button:hover, .flight-chooser .cancel:hover, .status-action:hover {
+    border-color: var(--color-brand);
+    color: var(--color-text-primary);
 }
 
 .download-confirm-actions button.replace {
@@ -497,7 +524,8 @@
     color: var(--color-on-brand);
 }
 
-/* Project name breadcrumb: reads as text until it is hovered or edited */
+/* ---- Project name, with the project menu under it */
+
 .project-name {
     min-width: 0;
     max-width: 200px;
@@ -509,7 +537,7 @@
     border-radius: 6px;
     outline: none;
     font-family: "Figtree", sans-serif;
-    font-size: 14px;
+    font-size: 0.875rem;
     font-weight: normal;
     color: var(--color-text-secondary);
     text-overflow: ellipsis;
@@ -529,7 +557,6 @@
     color: var(--color-text-primary);
 }
 
-/* Project name with the recent projects under it */
 .project-switcher {
     position: relative;
     display: flex;
@@ -543,8 +570,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     margin: 0 0 0 2px;
     padding: 0;
     border: none;
@@ -552,7 +579,7 @@
     background-color: transparent;
     color: var(--color-text-secondary);
     cursor: pointer;
-    transition: background-color 0.15s ease, opacity 0.15s ease;
+    transition: background-color 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
 }
 
 .recent-toggle .icon-mask {
@@ -572,26 +599,13 @@
     cursor: default;
 }
 
-.recent-toggle:focus-visible {
-    outline: 2px solid var(--color-brand-accent);
-    outline-offset: 1px;
-}
-
 .recent-popover {
     position: absolute;
     top: calc(100% + 12px);
     left: -12px;
     z-index: 20;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
     width: 280px;
-    padding: 6px;
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    box-shadow: 0 8px 24px var(--color-shadow);
-    font-family: "Figtree", sans-serif;
+    transform-origin: top left;
 }
 
 .recent-list {
@@ -629,7 +643,7 @@
     background-color: transparent;
     color: var(--color-text-secondary);
     font: inherit;
-    font-size: 12px;
+    font-size: 0.75rem;
     font-weight: 600;
     cursor: pointer;
     opacity: 0;
@@ -664,24 +678,116 @@
     text-overflow: ellipsis;
 }
 
-.recent-list .download-item small {
-    color: var(--color-text-secondary);
-}
-
 .recent-message {
     display: flex;
     justify-content: center;
     margin: 0;
     padding: 8px 10px 10px;
-    font-size: 12px;
+    font-size: 0.75rem;
     line-height: 1.4;
     color: var(--color-text-secondary);
 }
 
-/* Above the controls row (bottom 16 + height 30 + gap 8), out of its centred flow */
+/* ---- Settings, under the gear */
+
+.settings-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 20;
+    width: 240px;
+    transform-origin: top right;
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 6px 4px 6px 10px;
+}
+
+.setting-label {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-text-primary);
+}
+
+.language-toggle, .theme-toggle {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    flex-shrink: 0;
+    height: 30px;
+    margin: 0;
+    padding: 2px;
+    background-color: var(--color-bg-app);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+}
+
+.language-toggle {
+    width: 88px;
+}
+
+.theme-toggle {
+    width: 60px;
+    cursor: pointer;
+    color: var(--color-text-secondary);
+}
+
+.language-toggle-option {
+    position: relative;
+    z-index: 1;
+    margin: 0;
+    padding: 0;
+    background-color: transparent;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: "Figtree", sans-serif;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    transition: color 0.15s ease;
+}
+
+.language-toggle-option[aria-checked="true"] {
+    color: var(--color-text-primary);
+}
+
+.theme-toggle-icon {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.language-toggle-thumb, .theme-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    background-color: var(--color-bg-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    box-shadow: 0 1px 2px var(--color-shadow);
+    transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), background-color 0.2s ease;
+}
+
+.language-toggle[data-active="en"] .language-toggle-thumb,
+.theme-toggle[aria-checked="true"] .theme-toggle-thumb {
+    transform: translateX(100%);
+}
+
+/* ---- Canvas messages */
+
+/* Above the controls row (bottom 16 + height 34 + gap 8), out of its centred flow */
 .busy {
     position: absolute;
-    bottom: 54px;
+    bottom: 58px;
     left: 50%;
     transform: translateX(-50%);
     pointer-events: none;
@@ -694,12 +800,12 @@
     border: 1px solid var(--color-border);
     border-radius: 15px;
     font-family: "Figtree", sans-serif;
-    font-size: 12px;
+    font-size: 0.75rem;
     color: var(--color-text-secondary);
     white-space: nowrap;
 }
 
-/* Status bar and notices at the top of the canvas */
+/* Notices, the status and the next-step hint at the top of the canvas */
 .top-stack {
     position: absolute;
     top: 12px;
@@ -713,7 +819,7 @@
     pointer-events: none;
 }
 
-.status-bar, .notice {
+.status-bar, .notice, .hint {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -725,9 +831,17 @@
     border-radius: 15px;
     box-shadow: 0 2px 8px var(--color-shadow);
     font-family: "Figtree", sans-serif;
-    font-size: 13px;
+    font-size: 0.8125rem;
     color: var(--color-text-secondary);
     pointer-events: auto;
+}
+
+.hint {
+    color: var(--color-text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
 }
 
 .status-bar .text, .notice .text {
@@ -735,6 +849,12 @@
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+}
+
+.status-action {
+    flex-shrink: 0;
+    height: 22px;
+    padding: 0 8px;
 }
 
 .status-bar.error {
@@ -749,9 +869,10 @@
     color: var(--color-warning);
 }
 
-/* One-colour icon drawn in the text colour (see maskIcon in Dashboard.tsx) */
+/* One-colour icon drawn in the text colour (see maskIcon in lib/ui.ts) */
 .icon-mask {
     display: block;
+    flex-shrink: 0;
     width: 14px;
     height: 14px;
     background-color: currentColor;
@@ -759,10 +880,8 @@
     mask: no-repeat center / contain;
 }
 
-/* The × in the corner of every pop-up; .popover-header and .dialog-header beat the
-   top bar's own button rules */
+/* The × in the corner of every pop-up; .dialog-header beats the top bar's own button rules */
 .close-button,
-.popover-header .close-button,
 .dialog-header .close-button {
     flex-shrink: 0;
     display: flex;
@@ -779,41 +898,17 @@
     color: inherit;
     opacity: 0.75;
     cursor: pointer;
-    transition: background-color 0.15s ease, opacity 0.15s ease;
+    transition: background-color 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
 }
 
 .close-button:hover,
-.popover-header .close-button:hover,
 .dialog-header .close-button:hover {
     opacity: 1;
     background-color: var(--color-shadow);
 }
 
-.close-button:focus-visible {
-    outline: 2px solid var(--color-brand-accent);
-    outline-offset: 1px;
-}
-
 .status-bar .close-button, .notice .close-button {
     margin-right: -7px;
-}
-
-/* Title row of a menu, with its close button */
-.popover-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 2px 2px 4px 10px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    color: var(--color-text-tertiary);
-}
-
-.popover-header .close-button {
-    color: var(--color-text-secondary);
 }
 
 .dialog-header {
@@ -844,7 +939,8 @@
     }
 }
 
-/* Empty state */
+/* ---- Empty state */
+
 .empty-state {
     position: absolute;
     top: 50%;
@@ -861,35 +957,37 @@
 
 .empty-state h3 {
     margin: 0;
-    font-size: 16px;
+    font-size: 1rem;
     font-weight: 600;
+    letter-spacing: -0.01em;
     color: var(--color-text-primary);
 }
 
 .empty-state p {
     margin: 0 0 8px;
-    font-size: 13px;
+    font-size: 0.8125rem;
     color: var(--color-text-secondary);
 }
 
-.empty-state button {
+.empty-state button.primary {
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 34px;
-    padding: 0 14px;
-    border: 1px solid var(--color-border);
+    height: 36px;
+    padding: 0 16px;
+    border: 1px solid var(--color-brand);
     border-radius: 8px;
-    background-color: var(--color-bg-surface);
-    color: var(--color-text-primary);
+    background-color: var(--color-brand);
+    color: var(--color-on-brand);
     font-family: "Figtree", sans-serif;
-    font-size: 13px;
+    font-size: 0.8125rem;
     font-weight: 600;
     cursor: pointer;
+    transition: filter 0.15s ease, transform 0.1s ease;
 }
 
-.empty-state button:hover:not(:disabled) {
-    border-color: var(--color-brand);
+.empty-state button.primary:hover:not(:disabled) {
+    filter: brightness(1.08);
 }
 
 .empty-state button:disabled {
@@ -897,27 +995,29 @@
     cursor: default;
 }
 
-.empty-state button img {
+.empty-state button.primary .icon-mask {
     width: 18px;
     height: 18px;
 }
 
 .empty-state button.link {
-    height: auto;
     padding: 2px 4px;
     border: none;
     background-color: transparent;
-    font-size: 12px;
+    font-family: "Figtree", sans-serif;
+    font-size: 0.75rem;
     font-weight: 500;
     color: var(--color-text-secondary);
     text-decoration: underline;
+    cursor: pointer;
 }
 
 .empty-state button.link:hover:not(:disabled) {
     color: var(--color-text-primary);
 }
 
-/* Several flights in the opened folder: which one? */
+/* ---- Several flights in the opened folder: which one? */
+
 .flight-chooser {
     position: absolute;
     top: 50%;
@@ -941,14 +1041,15 @@
 
 .flight-chooser h3 {
     margin: 0 4px;
-    font-size: 15px;
+    font-size: 0.9375rem;
     font-weight: 600;
+    letter-spacing: -0.01em;
     color: var(--color-text-primary);
 }
 
 .flight-chooser p {
     margin: 0 4px 4px;
-    font-size: 12px;
+    font-size: 0.75rem;
     color: var(--color-text-secondary);
     overflow-wrap: anywhere;
 }
@@ -965,149 +1066,61 @@
     flex-shrink: 0;
 }
 
-.flight-list .download-item small {
-    color: var(--color-text-secondary);
-}
-
 .flight-chooser .cancel {
     align-self: flex-end;
-    height: 28px;
     margin-top: 4px;
-    padding: 0 12px;
-    background-color: transparent;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
 }
 
-.flight-chooser .cancel:hover {
-    border-color: var(--color-brand);
-    color: var(--color-text-primary);
+/* ---- Press feedback: controls give way the moment they are pressed */
+
+:where(.tool-button, .download-button, .recent-toggle, .close-button, .view-toggle-option,
+       .language-toggle-option, .theme-toggle, .area, .empty-state button.primary,
+       .download-confirm-actions button, .flight-chooser .cancel, .status-action):active:not(:disabled) {
+    transform: scale(0.95);
 }
 
-/* Settings */
-.content-settings {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-    width: 100%;
-    height: calc(100vh - 56px);
-    padding: 24px;
-    background-color: var(--color-bg-app);
-    overflow-y: auto;
-    transition: background-color 0.2s ease;
+/* ---- Reduced motion: fades instead of movement */
+
+@media (prefers-reduced-motion: reduce) {
+    .popover {
+        animation-name: popover-fade-in;
+    }
+
+    .popover-exit {
+        animation-name: popover-fade-out;
+    }
+
+    .view-toggle-thumb, .language-toggle-thumb, .theme-toggle-thumb, .recent-toggle .icon-mask {
+        transition: none;
+    }
+
+    :where(.tool-button, .download-button, .recent-toggle, .close-button, .view-toggle-option,
+           .language-toggle-option, .theme-toggle, .area, .empty-state button.primary,
+           .download-confirm-actions button, .flight-chooser .cancel, .status-action):active:not(:disabled) {
+        transform: none;
+    }
+
+    /* a slow pulse instead of a spinning wheel */
+    .spinner {
+        border-color: var(--color-brand);
+        animation: terra-pulse 1.6s ease-in-out infinite;
+    }
 }
 
-.content-settings > div {
-    width: 100%;
-    max-width: 640px;
+@keyframes popover-fade-in {
+    from {
+        opacity: 0;
+    }
 }
 
-.setting-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    padding: 16px 20px;
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    transition: background-color 0.2s ease, border-color 0.2s ease;
+@keyframes popover-fade-out {
+    to {
+        opacity: 0;
+    }
 }
 
-.setting-row-text {
-    min-width: 0;
-}
-
-.setting-row-text h3 {
-    margin: 0;
-    font-family: "Figtree", sans-serif;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-}
-
-.setting-row-text p {
-    margin: 4px 0 0;
-    font-family: "Figtree", sans-serif;
-    font-size: 13px;
-    color: var(--color-text-secondary);
-}
-
-.language-toggle, .theme-toggle {
-    position: relative;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    flex-shrink: 0;
-    height: 30px;
-    margin: 0;
-    padding: 2px;
-    background-color: var(--color-bg-app);
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-}
-
-.language-toggle {
-    width: 88px;
-}
-
-.theme-toggle {
-    width: 60px;
-    cursor: pointer;
-}
-
-.language-toggle-option {
-    position: relative;
-    z-index: 1;
-    margin: 0;
-    padding: 0;
-    background-color: transparent;
-    border: none;
-    border-radius: 999px;
-    cursor: pointer;
-    font-family: "Figtree", sans-serif;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    transition: color 0.15s ease;
-}
-
-.language-toggle-option[aria-checked="true"] {
-    color: var(--color-text-primary);
-}
-
-.theme-toggle-icon {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.language-toggle-thumb, .theme-toggle-thumb {
-    position: absolute;
-    top: 2px;
-    bottom: 2px;
-    left: 2px;
-    width: calc(50% - 2px);
-    background-color: var(--color-bg-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-    box-shadow: 0 1px 2px var(--color-shadow);
-    transition: transform 0.2s ease, background-color 0.2s ease;
-}
-
-.language-toggle[data-active="en"] .language-toggle-thumb,
-.theme-toggle[aria-checked="true"] .theme-toggle-thumb {
-    transform: translateX(100%);
-}
-
-.language-toggle-option:focus-visible, .theme-toggle:focus-visible {
-    outline: 2px solid var(--color-brand-accent);
-    outline-offset: 2px;
+@keyframes terra-pulse {
+    50% {
+        opacity: 0.35;
+    }
 }

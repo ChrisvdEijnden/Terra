@@ -1,5 +1,4 @@
-import { useNavigate } from "react-router-dom";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import "../styles/global.css";
 import "./dashboard.css";
@@ -20,6 +19,7 @@ import {
     pickFolder,
     pickImages,
     recentProjects,
+    revealExportFolder,
     setProjectName,
     stageExportMask,
     stitchImages,
@@ -52,7 +52,7 @@ import {
     clampView,
     DEFAULT_PADDING,
     fitView,
-    panBy,
+    offsetRanges,
     resizeView,
     screenToImage,
     zoomAt,
@@ -60,7 +60,18 @@ import {
     type Size,
     type View,
 } from "../lib/viewport.ts";
+import {
+    axisAtRest,
+    interpolateView,
+    releaseVelocity,
+    resist,
+    springProgress,
+    stepAxis,
+    type Axis,
+} from "../lib/viewMotion.ts";
 import CopyToClipboard from "../lib/CopyToClipboard.tsx";
+import { maskIcon, onRadioKeys, prefersReducedMotion, usePresence } from "../lib/ui.ts";
+import SettingsMenu from "./Settings.tsx";
 import { useTranslation } from "../lib/useTranslations.ts";
 
 import LogoIcon26px from "../assets/icons/logo-26px.svg";
@@ -82,8 +93,6 @@ const LASSO_MIN_AREA = 4; // image px²; a smaller lasso is a slip, not an area
 const LASSO_COLOR = "#DC2626"; // same red as the overlay outside the lasso (OVERLAY_OUTSIDE_EDGE)
 const CLEAR_CONFIRM_MS = 3000;
 const NOISE_DEBOUNCE_MS = 150;
-/** Keeps the top of the image clear of the persistent notice (top 12 + height 30 + gap 8). */
-const NOTICE_PADDING: Padding = { ...DEFAULT_PADDING, top: 50 };
 const EMPTY_SET: ReadonlySet<LabelId> = new Set();
 const MAX_UNDO = 100; // steps kept in the undo history
 const MAX_PROJECT_NAME = 100; // characters, same limit as the backend
@@ -92,6 +101,8 @@ type StatusKind = "progress" | "error" | "warning" | "info";
 interface Status {
     kind: StatusKind;
     text: string;
+    /** A button next to the text, such as Show in Finder. */
+    action?: { label: string; run: () => void };
 }
 
 interface DisplaySource {
@@ -158,6 +169,11 @@ interface DragState {
     dragging: boolean;
     /** The press draws a lasso instead of panning. */
     lasso: boolean;
+    /** Offset the pointer has pulled the image to, before the resistance past the limits. */
+    rawX: number;
+    rawY: number;
+    /** Recent pointer positions, for the speed at release. */
+    samples: { t: number; x: number; y: number }[];
 }
 
 /** Minimal shape of WebKit's non-standard GestureEvent (trackpad pinch). */
@@ -214,11 +230,9 @@ function useDismiss(
     }, [open, menuRef, canvasRef, close]);
 }
 
-/** Draws a one-colour SVG icon in the text colour (so it follows the theme and the
- *  colour of a warning or error), with the icon as a CSS mask. */
-function maskIcon(url: string): CSSProperties {
-    const image = `url("${url}")`;
-    return { WebkitMaskImage: image, maskImage: image };
+/** An icon button's icon, drawn in the button's text colour. */
+function Icon({ src }: { src: string }) {
+    return <span className="icon-mask" style={maskIcon(src)} aria-hidden="true" />;
 }
 
 /** The × in the corner of every pop-up. */
@@ -255,19 +269,26 @@ function readPixels(image: HTMLImageElement): ImageData {
     }
 }
 
+/** Accepts a decimal comma or point, whatever the language. */
 function parseGsd(text: string): number | null {
-    const v = parseFloat(text);
-    return Number.isFinite(v) && v > 0 ? v : null;
+    const v = Number(text.trim().replace(",", "."));
+    return text.trim() !== "" && Number.isFinite(v) && v > 0 ? v : null;
 }
 
-function formatGsd(v: number): string {
-    return String(Number(v.toPrecision(4)));
+function formatGsd(v: number, language: string): string {
+    return Number(v.toPrecision(4)).toLocaleString(language, { useGrouping: false, maximumFractionDigits: 10 });
 }
+
+/** Width of a small number field: as wide as its text, so the unit sits right after it. */
+function fieldWidth(text: string, placeholder: string): string {
+    return `${Math.max(text.length, placeholder.length, 1) + 1}ch`;
+}
+
+const RADIO_VIEWS = ["thermal", "world"] as const;
 
 const AREA_FORMAT: Intl.NumberFormatOptions = { minimumFractionDigits: 3, maximumFractionDigits: 3, useGrouping: false };
 
 function Dashboard() {
-    const navigate = useNavigate();
     const mask = useWaterMask();
     const { t, language } = useTranslation();
     // For the image loading effect: a language change must not reload the image
@@ -290,6 +311,10 @@ function Dashboard() {
     const drawPendingRef = useRef(0);
     const dragRef = useRef<DragState | null>(null);
     const gestureRef = useRef<{ startScale: number; x: number; y: number } | null>(null);
+    /** The running zoom, fit or glide animation (requestAnimationFrame id, 0 when none). */
+    const motionFrameRef = useRef(0);
+    /** Where the running zoom or fit animation ends, so a key press during it continues from there. */
+    const motionTargetRef = useRef<View | null>(null);
     /** The lasso being drawn, in image coordinates (null when not drawing). */
     const lassoDraftRef = useRef<Point[] | null>(null);
     /** Display key whose worker crash was already retried once. */
@@ -308,7 +333,7 @@ function Dashboard() {
     const [loaded, setLoaded] = useState<LoadedImage | null>(null);
     const [imageLoading, setImageLoading] = useState(false);
     const [tolerance, setTolerance] = useState(1);
-    const [noiseText, setNoiseText] = useState("0");
+    const [noiseText, setNoiseText] = useState(""); // empty is 0
     const [noise, setNoise] = useState(0);
     const [picking, setPicking] = useState(true);
     const [lassoMode, setLassoMode] = useState(false);
@@ -338,6 +363,10 @@ function Dashboard() {
     const [openMenu, setOpenMenu] = useState(false);
     const openMenuRef = useRef<HTMLDivElement | null>(null);
     const [flightChoice, setFlightChoice] = useState<FlightChoice | null>(null);
+
+    // ---- settings (under the gear)
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    const settingsMenuRef = useRef<HTMLDivElement | null>(null);
 
     // ---- recent projects (under the project name)
     const [recentOpen, setRecentOpen] = useState(false);
@@ -591,6 +620,7 @@ function Dashboard() {
     const toggleRecent = useCallback(() => {
         if (recentOpen) {
             setRecentOpen(false);
+            cancelClearConfirm();
             return;
         }
         setRecentOpen(true);
@@ -600,7 +630,7 @@ function Dashboard() {
             setRecentOpen(false);
             showError(t("dashboard.recentFailed", { error: errorMessage(err) }));
         });
-    }, [recentOpen, showError, t]);
+    }, [recentOpen, cancelClearConfirm, showError, t]);
 
     /** First click arms the button, a second one within a few seconds deletes the project. */
     const deleteRecent = useCallback(
@@ -666,6 +696,7 @@ function Dashboard() {
         }
         cancelClearConfirm();
         clearStatus();
+        setRecentOpen(false);
         const seq = ++stateSeqRef.current;
         try {
             const state = await clearProject();
@@ -750,22 +781,98 @@ function Dashboard() {
         return image ? { width: image.naturalWidth, height: image.naturalHeight } : null;
     };
 
-    const fit = useCallback(() => {
-        const image = imageRef.current;
-        const vp = viewportRef.current;
-        if (!image || vp.width === 0) return;
-        viewRef.current = fitView({ width: image.naturalWidth, height: image.naturalHeight }, vp, paddingRef.current);
-        fitModeRef.current = true;
-        requestDraw();
-    }, [requestDraw]);
+    // ---- motion: zoom and fit animate, a flick glides; any new input stops it where it is
+    const stopMotion = useCallback(() => {
+        if (motionFrameRef.current) cancelAnimationFrame(motionFrameRef.current);
+        motionFrameRef.current = 0;
+        motionTargetRef.current = null;
+    }, []);
+    useEffect(() => stopMotion, [stopMotion]);
 
-    const zoomBy = useCallback(
-        (factor: number, x?: number, y?: number) => {
+    /** Animates from the view on screen now to `target` (critically damped, no overshoot). */
+    const animateTo = useCallback(
+        (target: View) => {
+            stopMotion();
+            if (prefersReducedMotion()) {
+                viewRef.current = target;
+                requestDraw();
+                return;
+            }
+            const from = viewRef.current;
+            const start = performance.now();
+            motionTargetRef.current = target;
+            const frame = (now: number) => {
+                const p = springProgress((now - start) / 1000);
+                const done = p > 0.999;
+                viewRef.current = done ? target : interpolateView(from, target, p);
+                draw();
+                if (done) {
+                    motionFrameRef.current = 0;
+                    motionTargetRef.current = null;
+                } else motionFrameRef.current = requestAnimationFrame(frame);
+            };
+            motionFrameRef.current = requestAnimationFrame(frame);
+        },
+        [draw, requestDraw, stopMotion]
+    );
+
+    /** After a pan: coast with the pointer's speed, then settle inside the limits. */
+    const glide = useCallback(
+        (velocity: { x: number; y: number }) => {
+            stopMotion();
+            const size = imageSize();
+            if (!size) return;
+            const limits = () => offsetRanges(viewRef.current, size, viewportRef.current, paddingRef.current);
+            const v = prefersReducedMotion() ? { x: 0, y: 0 } : velocity;
+            let ax: Axis = { x: viewRef.current.offsetX, v: v.x };
+            let ay: Axis = { x: viewRef.current.offsetY, v: v.y };
+            let last = performance.now();
+            const frame = (now: number) => {
+                const dt = Math.min(0.05, (now - last) / 1000);
+                last = now;
+                const r = limits();
+                ax = stepAxis(ax, dt, r.x.lo, r.x.hi);
+                ay = stepAxis(ay, dt, r.y.lo, r.y.hi);
+                const rest = axisAtRest(ax, r.x.lo, r.x.hi) && axisAtRest(ay, r.y.lo, r.y.hi);
+                const x = rest ? Math.min(r.x.hi, Math.max(r.x.lo, ax.x)) : ax.x;
+                const y = rest ? Math.min(r.y.hi, Math.max(r.y.lo, ay.x)) : ay.x;
+                viewRef.current = { ...viewRef.current, offsetX: x, offsetY: y };
+                draw();
+                motionFrameRef.current = rest ? 0 : requestAnimationFrame(frame);
+            };
+            motionFrameRef.current = requestAnimationFrame(frame);
+        },
+        [draw, stopMotion]
+    );
+
+    /** Fits the whole image in view; animated for a key press, instant otherwise. */
+    const fit = useCallback(
+        (animated = false) => {
             const image = imageRef.current;
             const vp = viewportRef.current;
             if (!image || vp.width === 0) return;
-            viewRef.current = zoomAt(
-                viewRef.current,
+            const target = fitView({ width: image.naturalWidth, height: image.naturalHeight }, vp, paddingRef.current);
+            fitModeRef.current = true;
+            if (animated) animateTo(target);
+            else {
+                stopMotion();
+                viewRef.current = target;
+                requestDraw();
+            }
+        },
+        [animateTo, requestDraw, stopMotion]
+    );
+
+    /** Zooms about (x, y), the centre by default. Wheel and pinch follow the fingers 1:1;
+     *  key presses animate, each from where the previous one is heading. */
+    const zoomBy = useCallback(
+        (factor: number, x?: number, y?: number, animated = false) => {
+            const image = imageRef.current;
+            const vp = viewportRef.current;
+            if (!image || vp.width === 0) return;
+            const base = (animated && motionTargetRef.current) || viewRef.current;
+            const target = zoomAt(
+                base,
                 factor,
                 x ?? vp.width / 2,
                 y ?? vp.height / 2,
@@ -774,9 +881,14 @@ function Dashboard() {
                 paddingRef.current
             );
             fitModeRef.current = false;
-            requestDraw();
+            if (animated) animateTo(target);
+            else {
+                stopMotion();
+                viewRef.current = target;
+                requestDraw();
+            }
         },
-        [requestDraw]
+        [animateTo, requestDraw, stopMotion]
     );
 
     // Keep the view sensible when the window resizes.
@@ -789,6 +901,7 @@ function Dashboard() {
             viewportRef.current = next;
             const size = imageSize();
             if (size && next.width > 0 && next.height > 0) {
+                stopMotion();
                 if (fitModeRef.current || prev.width === 0 || prev.height === 0) {
                     viewRef.current = fitView(size, next, paddingRef.current);
                 } else {
@@ -799,7 +912,7 @@ function Dashboard() {
         });
         observer.observe(container);
         return () => observer.disconnect();
-    }, [requestDraw]);
+    }, [requestDraw, stopMotion]);
 
     // ---- image loading: bytes from Rust -> Blob -> object URL (same origin, canvas never tainted)
     const displayKey = displaySource?.key ?? null;
@@ -857,6 +970,7 @@ function Dashboard() {
                 imageUrlRef.current = url;
                 url = null;
                 imageRef.current = image;
+                stopMotion();
                 const size = { width: image.naturalWidth, height: image.naturalHeight };
                 if (viewportRef.current.width > 0) viewRef.current = fitView(size, viewportRef.current, paddingRef.current);
                 fitModeRef.current = true;
@@ -893,7 +1007,7 @@ function Dashboard() {
         return () => {
             cancelled = true;
         };
-    }, [displayKey, displayPath, clearImage, sendPixelsToWorker, requestDraw]);
+    }, [displayKey, displayPath, clearImage, sendPixelsToWorker, requestDraw, stopMotion]);
 
     // Revoke the object URLs when leaving the page.
     useEffect(() => () => {
@@ -1052,7 +1166,7 @@ function Dashboard() {
 
     const gsd = gsdTouched ? parseGsd(gsdText) : estimatedGsd;
     const gsdIsEstimate = !gsdTouched && estimatedGsd !== null;
-    const gsdInputValue = gsdTouched ? gsdText : estimatedGsd !== null ? formatGsd(estimatedGsd) : "";
+    const gsdInputValue = gsdTouched ? gsdText : estimatedGsd !== null ? formatGsd(estimatedGsd, language) : "";
     const area = pixelCount === null ? null : areaHectares(pixelCount, gsd, panoScale);
 
     const current = loaded && loaded.key === displayKey ? loaded : null;
@@ -1077,18 +1191,20 @@ function Dashboard() {
         }
     }, [analysisCrashed, current, refHue, tolerance, sendPixelsToWorker, requestSegmentation, t]);
 
-    let areaLabelText: string;
-    if (!displaySource) areaLabelText = t("dashboard.openImagesToStart");
-    else if (imageLoading || (current && mask.analysing)) areaLabelText = t("dashboard.loadingImage");
-    else if (!current) areaLabelText = t("dashboard.imageUnavailable");
-    else if (current.maskImageId === 0 || analysisCrashed) areaLabelText = t("dashboard.measuringUnavailable");
-    else if (lassoMode) areaLabelText = t("dashboard.drawLasso");
-    else if (picking) areaLabelText = t("dashboard.clickWater");
-    else if (refHue === null) areaLabelText = t("dashboard.pickReferenceColour");
-    else if (pixelCount === null) areaLabelText = t("dashboard.findingWater");
-    else if (area === null) areaLabelText = t("dashboard.pixelsEnterGsd", { pixels: pixelCount.toLocaleString(language) });
-    else areaLabelText = t("dashboard.area", { area: area.toLocaleString(language, AREA_FORMAT) });
-    if (copied && area !== null) areaLabelText = t("dashboard.copied");
+    // The top bar shows only the result; what to do next is a hint on the canvas.
+    let areaValue: string;
+    if (copied && area !== null) areaValue = t("dashboard.copied");
+    else if (area !== null) areaValue = `${area.toLocaleString(language, AREA_FORMAT)} ha`;
+    else if (pixelCount !== null) areaValue = t("dashboard.pixelsEnterGsd", { pixels: pixelCount.toLocaleString(language) });
+    else areaValue = t("dashboard.areaNone");
+
+    let hint: string | null = null;
+    if (!displaySource || imageLoading || (current && mask.analysing)) hint = null; // empty state or busy pill
+    else if (!current) hint = t("dashboard.imageUnavailable");
+    else if (current.maskImageId === 0 || analysisCrashed) hint = t("dashboard.measuringUnavailable");
+    else if (lassoMode) hint = t("dashboard.drawLasso");
+    else if (picking) hint = t("dashboard.clickWater");
+    else if (refHue === null) hint = t("dashboard.pickReferenceColour");
 
     const scaleUnverified = showingPanorama && !panorama!.gpsAligned;
 
@@ -1121,17 +1237,29 @@ function Dashboard() {
     };
 
     // ---- downloads
-    const closeDownload = useCallback(() => {
-        setDownloadOpen(false);
+    const closeDownload = useCallback(() => setDownloadOpen(false), []);
+    const openDownload = useCallback(() => {
         setReplacePrompt(null);
+        setDownloadOpen(true);
     }, []);
     useDismiss(downloadOpen, downloadMenuRef, canvasRef, closeDownload);
 
     const closeOpenMenu = useCallback(() => setOpenMenu(false), []);
     useDismiss(openMenu, openMenuRef, canvasRef, closeOpenMenu);
 
-    const closeRecent = useCallback(() => setRecentOpen(false), []);
+    const closeRecent = useCallback(() => {
+        setRecentOpen(false);
+        cancelClearConfirm();
+    }, [cancelClearConfirm]);
     useDismiss(recentOpen, recentMenuRef, canvasRef, closeRecent);
+
+    const closeSettings = useCallback(() => setSettingsOpen(false), []);
+    useDismiss(settingsOpen, settingsMenuRef, canvasRef, closeSettings);
+
+    const downloadPresence = usePresence(downloadOpen);
+    const openPresence = usePresence(openMenu);
+    const recentPresence = usePresence(recentOpen);
+    const settingsPresence = usePresence(settingsOpen);
 
     // The world mosaic of a thermal project is stitched when it is first asked for.
     const worldToStitch = hasWorld && !worldMosaic(project);
@@ -1175,7 +1303,17 @@ function Dashboard() {
                 areaHectares: measured.area,
                 panoramaMtimeMs: measured.panoramaMtimeMs,
             });
-            setStatus({ kind: "info", text: t("dashboard.exportSaved", { folder: result.folder }) });
+            setStatus({
+                kind: "info",
+                text: t("dashboard.exportSaved", { folder: result.folder }),
+                action: {
+                    label: t("dashboard.showInFinder"),
+                    run: () =>
+                        void revealExportFolder().catch((err) =>
+                            showError(t("dashboard.revealFailed", { error: errorMessage(err) }))
+                        ),
+                },
+            });
         } catch (err) {
             setStatus({ kind: "error", text: t("dashboard.exportFailed", { error: errorMessage(err) }) });
         } finally {
@@ -1280,6 +1418,8 @@ function Dashboard() {
     const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
         if (e.button !== 0 || e.ctrlKey) return; // ctrl-click is a context click on macOS
         e.currentTarget.setPointerCapture(e.pointerId);
+        // grabbing the image mid-glide stops it right there
+        stopMotion();
         const lassoPress = lassoMode && !!current;
         lassoDraftRef.current = lassoPress ? [lassoPointAt(e.clientX, e.clientY)] : null;
         dragRef.current = {
@@ -1290,6 +1430,9 @@ function Dashboard() {
             lastY: e.clientY,
             dragging: false,
             lasso: lassoPress,
+            rawX: viewRef.current.offsetX,
+            rawY: viewRef.current.offsetY,
+            samples: [{ t: e.timeStamp, x: e.clientX, y: e.clientY }],
         };
     };
 
@@ -1318,7 +1461,10 @@ function Dashboard() {
             dragRef.current = null;
             if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
             if (d.lasso) finishLasso(d, true);
-            else if (d.dragging) setDragging(false);
+            else if (d.dragging) {
+                setDragging(false);
+                glide({ x: 0, y: 0 });
+            }
             return;
         }
         if (d.lasso) {
@@ -1337,16 +1483,20 @@ function Dashboard() {
             d.dragging = true;
             setDragging(true);
         }
+        // 1:1 with the pointer inside the limits, with growing resistance past them
+        d.rawX += e.clientX - d.lastX;
+        d.rawY += e.clientY - d.lastY;
+        d.samples.push({ t: e.timeStamp, x: e.clientX, y: e.clientY });
+        if (d.samples.length > 8) d.samples.shift();
         const size = imageSize();
         if (size) {
-            viewRef.current = panBy(
-                viewRef.current,
-                e.clientX - d.lastX,
-                e.clientY - d.lastY,
-                size,
-                viewportRef.current,
-                paddingRef.current
-            );
+            const vp = viewportRef.current;
+            const r = offsetRanges(viewRef.current, size, vp, paddingRef.current);
+            viewRef.current = {
+                ...viewRef.current,
+                offsetX: resist(d.rawX, r.x.lo, r.x.hi, vp.width),
+                offsetY: resist(d.rawY, r.y.lo, r.y.hi, vp.height),
+            };
             fitModeRef.current = false;
             requestDraw();
         }
@@ -1360,8 +1510,11 @@ function Dashboard() {
         dragRef.current = null;
         if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
         if (d.lasso) finishLasso(d, isClick);
-        else if (d.dragging) setDragging(false);
-        else if (isClick) {
+        else if (d.dragging) {
+            setDragging(false);
+            // keep the flick's speed; a cancelled pointer only settles back inside the limits
+            glide(isClick ? releaseVelocity(d.samples, e.timeStamp) : { x: 0, y: 0 });
+        } else if (isClick) {
             const p = localPoint(e.clientX, e.clientY);
             handleCanvasClickRef.current(p.x, p.y);
         }
@@ -1376,12 +1529,27 @@ function Dashboard() {
             if (!imageRef.current) return;
             e.preventDefault();
             if (gestureRef.current) return; // WebKit pinch is handled by gesture events
-            let dy = e.deltaY;
-            if (e.deltaMode === 1) dy *= 16;
-            else if (e.deltaMode === 2) dy *= viewportRef.current.height || 800;
-            const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.002));
-            const p = localPoint(e.clientX, e.clientY);
-            zoomBy(Math.min(2, Math.max(0.5, factor)), p.x, p.y);
+            const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? viewportRef.current.height || 800 : 1;
+            const dx = e.deltaX * unit;
+            const dy = e.deltaY * unit;
+            if (e.ctrlKey || e.metaKey) {
+                // a trackpad pinch arrives as ctrl+wheel; ⌘+wheel zooms with a mouse
+                const factor = Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.002));
+                const p = localPoint(e.clientX, e.clientY);
+                zoomBy(Math.min(2, Math.max(0.5, factor)), p.x, p.y);
+                return;
+            }
+            // two-finger scroll pans, like Maps; the system's own momentum keeps it gliding
+            stopMotion();
+            const image = imageRef.current;
+            viewRef.current = clampView(
+                { ...viewRef.current, offsetX: viewRef.current.offsetX - dx, offsetY: viewRef.current.offsetY - dy },
+                { width: image.naturalWidth, height: image.naturalHeight },
+                viewportRef.current,
+                paddingRef.current
+            );
+            fitModeRef.current = false;
+            requestDraw();
         };
         const onGestureStart = (e: Event) => {
             e.preventDefault();
@@ -1411,7 +1579,7 @@ function Dashboard() {
             canvas.removeEventListener("gesturechange", onGestureChange);
             canvas.removeEventListener("gestureend", onGestureEnd);
         };
-    }, [zoomBy]);
+    }, [zoomBy, stopMotion, requestDraw]);
 
     // Keyboard: 0 = fit, +/- = zoom, Escape = leave picking mode.
     const refHueRef = useRef(refHue);
@@ -1432,9 +1600,9 @@ function Dashboard() {
             }
             if (e.metaKey || e.ctrlKey || e.altKey) return;
             if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-            if (e.key === "0") fit();
-            else if (e.key === "+" || e.key === "=") zoomBy(1.25);
-            else if (e.key === "-" || e.key === "_") zoomBy(0.8);
+            if (e.key === "0") fit(true);
+            else if (e.key === "+" || e.key === "=") zoomBy(1.25, undefined, undefined, true);
+            else if (e.key === "-" || e.key === "_") zoomBy(0.8, undefined, undefined, true);
             else if (e.key === "Escape" && lassoModeRef.current) {
                 lassoDraftRef.current = null;
                 setLassoMode(false);
@@ -1488,25 +1656,21 @@ function Dashboard() {
     const noticeKey = fullNotice ? `${fullNotice.kind}|${panorama!.path}|${panorama!.mtimeMs}|${images.length}` : null;
     const notice = noticeKey !== closedNotice ? fullNotice : null;
 
-    // While the notice shows, the image is fitted and clamped below it.
-    const padding = notice ? NOTICE_PADDING : DEFAULT_PADDING;
-    paddingRef.current = padding;
-    useEffect(() => {
-        const size = imageSize();
-        const vp = viewportRef.current;
-        if (!size || vp.width === 0 || vp.height === 0) return;
-        viewRef.current = fitModeRef.current
-            ? fitView(size, vp, padding)
-            : clampView(viewRef.current, size, vp, padding);
-        requestDraw();
-    }, [padding, requestDraw]);
+    const hasClearable = images.length > 0 || !!panorama;
+    // a stitch or export in progress; a click would interrupt it
+    const busy = stitching || exporting;
+
+    const worldDisabled =
+        !showingPanorama || !current || !panorama!.georeferenced || worldOffMap || (!worldView && (stitching || exporting));
+    const viewValue = worldOn ? "world" : "thermal";
+    const pickView = (view: (typeof RADIO_VIEWS)[number]) => (view === "world" ? void showWorld() : setWorldOn(false));
 
     return (
         <div>
             <div className="nav">
                 <div className="brand-and-breadcrumb">
                     <div className="brand">
-                        <img src={LogoIcon26px} alt="PhysicsGo logo" />
+                        <img src={LogoIcon26px} alt="" />
                     </div>
 
                     <h1>Terra</h1>
@@ -1538,15 +1702,20 @@ function Dashboard() {
                             type="button"
                             className={`recent-toggle${recentOpen ? " open" : ""}`}
                             onClick={toggleRecent}
-                            disabled={stitching || exporting}
-                            title={t("dashboard.recentProjects")}
-                            aria-label={t("dashboard.recentProjects")}
+                            disabled={busy}
+                            title={t("dashboard.projectMenu")}
+                            aria-label={t("dashboard.projectMenu")}
                             aria-expanded={recentOpen}
                         >
-                            <span className="icon-mask" style={maskIcon(ChevronDown21px)} aria-hidden="true" />
+                            <Icon src={ChevronDown21px} />
                         </button>
-                        {recentOpen && (
-                            <div className="recent-popover" role="dialog" aria-label={t("dashboard.recentProjects")}>
+                        {recentPresence.mounted && (
+                            <div
+                                className={`recent-popover popover${recentPresence.closing ? " popover-exit" : ""}`}
+                                role="dialog"
+                                aria-label={t("dashboard.projectMenu")}
+                            >
+                                <div className="popover-header">{t("dashboard.recentProjects")}</div>
                                 {recent === null ? (
                                     <p className="recent-message">
                                         <span className="spinner" aria-hidden="true" />
@@ -1557,93 +1726,105 @@ function Dashboard() {
                                     <div className="recent-list">
                                         {recent.map((item) => (
                                             <div key={item.id} className="recent-row">
-                                            <button className="download-item" onClick={() => void pickRecent(item.id)}>
-                                                <span className="recent-name">{item.name ?? t("dashboard.untitled")}</span>
-                                                <small>
-                                                    {[
-                                                        t("dashboard.recentPhotos", { count: item.images }),
-                                                        item.openedAtMs > 0
-                                                            ? new Date(item.openedAtMs).toLocaleString(language, {
-                                                                  dateStyle: "medium",
-                                                                  timeStyle: "short",
-                                                              })
-                                                            : null,
-                                                        item.hasPanorama ? null : t("dashboard.recentNotStitched"),
-                                                    ]
-                                                        .filter(Boolean)
-                                                        .join(" · ")}
-                                                </small>
-                                            </button>
-                                            <button
-                                                type="button"
-                                                className={`recent-delete${confirmDelete === item.id ? " confirm" : ""}`}
-                                                onClick={() => void deleteRecent(item.id)}
-                                                title={
-                                                    confirmDelete === item.id
-                                                        ? t("dashboard.deleteProjectConfirmHint")
-                                                        : t("dashboard.deleteProject")
-                                                }
-                                                aria-label={t("dashboard.deleteProject")}
-                                            >
-                                                <span className="icon-mask" style={maskIcon(Trash21px)} aria-hidden="true" />
-                                                {confirmDelete === item.id && <span>{t("dashboard.deleteProjectConfirm")}</span>}
-                                            </button>
+                                                <button className="download-item" onClick={() => void pickRecent(item.id)}>
+                                                    <span className="recent-name">{item.name ?? t("dashboard.untitled")}</span>
+                                                    <small>
+                                                        {[
+                                                            t("dashboard.recentPhotos", { count: item.images }),
+                                                            item.openedAtMs > 0
+                                                                ? new Date(item.openedAtMs).toLocaleString(language, {
+                                                                      dateStyle: "medium",
+                                                                      timeStyle: "short",
+                                                                  })
+                                                                : null,
+                                                            item.hasPanorama ? null : t("dashboard.recentNotStitched"),
+                                                        ]
+                                                            .filter(Boolean)
+                                                            .join(" · ")}
+                                                    </small>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className={`recent-delete${confirmDelete === item.id ? " confirm" : ""}`}
+                                                    onClick={() => void deleteRecent(item.id)}
+                                                    title={
+                                                        confirmDelete === item.id
+                                                            ? t("dashboard.deleteProjectConfirmHint")
+                                                            : t("dashboard.deleteProject")
+                                                    }
+                                                    aria-label={t("dashboard.deleteProject")}
+                                                >
+                                                    <Icon src={Trash21px} />
+                                                    {confirmDelete === item.id && <span>{t("dashboard.deleteProjectConfirm")}</span>}
+                                                </button>
                                             </div>
                                         ))}
                                     </div>
                                 )}
+                                <div className="download-divider" />
+                                <button
+                                    type="button"
+                                    className={`download-item danger${confirmClear ? " confirm" : ""}`}
+                                    disabled={!hasClearable || busy}
+                                    onClick={() => void onClear()}
+                                >
+                                    {confirmClear ? t("dashboard.clearProjectConfirm") : t("dashboard.clearProject")}
+                                    <small>{t("dashboard.clearProjectHint")}</small>
+                                </button>
                             </div>
                         )}
                     </div>
                 </div>
 
                 <div className="system-actions">
-                    <div className="noise" title={t("dashboard.noiseHint")}>
-                        <p>
-                            {t("dashboard.noiseLabel")}{" "}
-                            <input
-                                type="number"
-                                step="1"
-                                min="0"
-                                placeholder="1000"
-                                value={noiseText}
-                                onChange={(e) => setNoiseText(e.target.value)}
-                            />
-                            px
-                        </p>
-                    </div>
-                    <div className="gsd" title={t("dashboard.gsdHint")}>
-                        <p>
-                            GSD:{" "}
-                            <input
-                                type="number"
-                                step="any"
-                                min="0"
-                                placeholder="0.0883"
-                                value={gsdInputValue}
-                                onChange={(e) => {
-                                    setGsdText(e.target.value);
-                                    setGsdTouched(true);
-                                }}
-                                onBlur={(e) => {
-                                    // leaving the field empty falls back to the GPS estimate (if any)
-                                    if (e.target.value.trim() === "") resetGsd();
-                                }}
-                            />
-                            m/px
-                            {gsdIsEstimate && (
-                                <span className="gsd-estimate" title={t("dashboard.estimatedFromGps")}>
-                                    {t("dashboard.estimateShort")}
-                                </span>
-                            )}
-                        </p>
-                    </div>
-                    <div
-                        className={`area${area !== null ? " copyable" : ""}`}
+                    <label className="noise" title={t("dashboard.noiseHint")}>
+                        <span className="field-label">{t("dashboard.noiseLabel")}</span>
+                        <input
+                            type="text"
+                            inputMode="numeric"
+                            placeholder="0"
+                            value={noiseText}
+                            aria-label={t("dashboard.noiseLabel")}
+                            style={{ width: fieldWidth(noiseText, "0") }}
+                            onChange={(e) => setNoiseText(e.target.value.replace(/\D/g, ""))}
+                        />
+                        <span className="unit">px</span>
+                    </label>
+                    <label className="gsd" title={t("dashboard.gsdHint")}>
+                        <span className="field-label">GSD</span>
+                        <input
+                            type="text"
+                            inputMode="decimal"
+                            placeholder="—"
+                            value={gsdInputValue}
+                            aria-label={t("dashboard.gsdHint")}
+                            style={{ width: fieldWidth(gsdInputValue, "—") }}
+                            onChange={(e) => {
+                                setGsdText(e.target.value.replace(/[^\d.,]/g, ""));
+                                setGsdTouched(true);
+                            }}
+                            onBlur={(e) => {
+                                // leaving the field empty falls back to the GPS estimate (if any)
+                                if (e.target.value.trim() === "") resetGsd();
+                            }}
+                        />
+                        <span className="unit">m/px</span>
+                        {gsdIsEstimate && (
+                            <span className="gsd-estimate" title={t("dashboard.estimatedFromGps")}>
+                                {t("dashboard.estimateShort")}
+                            </span>
+                        )}
+                    </label>
+                    <button
+                        type="button"
+                        className="area"
                         onClick={onAreaClick}
+                        disabled={area === null}
                         title={area !== null ? t("dashboard.copyAreaHint") : undefined}
+                        aria-live="polite"
                     >
-                        <p>{areaLabelText}</p>
+                        <span className="area-label">{t("dashboard.area")}</span>
+                        <strong className="area-value">{areaValue}</strong>
                         {scaleUnverified && (
                             <span
                                 className="area-warning"
@@ -1653,21 +1834,23 @@ function Dashboard() {
                                 !
                             </span>
                         )}
-                    </div>
+                    </button>
 
                     <div className="right-system-actions">
                         <div className="open-menu" ref={openMenuRef}>
                             <button
+                                type="button"
                                 className={openMenu ? "open" : undefined}
                                 onClick={() => setOpenMenu((open) => !open)}
-                                disabled={stitching || exporting}
+                                disabled={busy}
                                 title={t("dashboard.openImagesHint")}
+                                aria-label={t("dashboard.openImages")}
                                 aria-expanded={openMenu}
                             >
-                                <img src={FolderOpen21px} alt={t("dashboard.openImages")} />
+                                <Icon src={FolderOpen21px} />
                             </button>
-                            {openMenu && (
-                                <div className="open-popover">
+                            {openPresence.mounted && (
+                                <div className={`open-popover popover${openPresence.closing ? " popover-exit" : ""}`}>
                                     <button className="download-item" onClick={() => void openFolder()}>
                                         {t("dashboard.openFolder")}
                                         <small>{t("dashboard.openFolderHint")}</small>
@@ -1680,27 +1863,38 @@ function Dashboard() {
                             )}
                         </div>
                         {showStitchAgain && (
-                            <button onClick={onStitchAgain} title={t("dashboard.stitchAgainHint")}>
-                                <img src={StitchAgain21px} alt={t("dashboard.stitchAgain")} />
+                            <button
+                                type="button"
+                                onClick={onStitchAgain}
+                                title={t("dashboard.stitchAgainHint")}
+                                aria-label={t("dashboard.stitchAgain")}
+                            >
+                                <Icon src={StitchAgain21px} />
                             </button>
                         )}
                         {stitching && (
-                            <button onClick={() => void onCancelStitch()} title={t("dashboard.cancelStitching")}>
-                                <img src={Cancel21px} alt={t("dashboard.cancelStitching")} />
+                            <button
+                                type="button"
+                                onClick={() => void onCancelStitch()}
+                                title={t("dashboard.cancelStitching")}
+                                aria-label={t("dashboard.cancelStitching")}
+                            >
+                                <Icon src={Cancel21px} />
                             </button>
                         )}
-                        <button
-                            className={confirmClear ? "confirm" : undefined}
-                            onClick={() => void onClear()}
-                            disabled={stitching || exporting || (images.length === 0 && !panorama)}
-                            title={confirmClear ? t("dashboard.clearConfirmHint") : t("dashboard.clearAllHint")}
-                        >
-                            <img src={Trash21px} alt={t("dashboard.clearImages")} />
-                            {confirmClear && <span>{t("dashboard.clearConfirm")}</span>}
-                        </button>
-                        <button onClick={() => navigate("/settings")} title={t("settings.title")}>
-                            <img src={SettingsIcon21px} alt={t("settings.title")} />
-                        </button>
+                        <div className="settings-menu" ref={settingsMenuRef}>
+                            <button
+                                type="button"
+                                className={settingsOpen ? "open" : undefined}
+                                onClick={() => setSettingsOpen((open) => !open)}
+                                title={t("settings.title")}
+                                aria-label={t("settings.title")}
+                                aria-expanded={settingsOpen}
+                            >
+                                <Icon src={SettingsIcon21px} />
+                            </button>
+                            {settingsPresence.mounted && <SettingsMenu closing={settingsPresence.closing} />}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1722,8 +1916,8 @@ function Dashboard() {
                     <div className="empty-state">
                         <h3>{t("dashboard.noImagesTitle")}</h3>
                         <p>{t("dashboard.noImagesText")}</p>
-                        <button onClick={() => void openFolder()} disabled={stitching}>
-                            <img src={FolderOpen21px} alt="" />
+                        <button className="primary" onClick={() => void openFolder()} disabled={stitching}>
+                            <Icon src={FolderOpen21px} />
                             {t("dashboard.openFolder")}
                         </button>
                         <button className="link" onClick={() => void openPhotos()} disabled={stitching}>
@@ -1764,7 +1958,7 @@ function Dashboard() {
                     </div>
                 )}
 
-                {(notice || status) && (
+                {(notice || status || hint) && (
                     <div className="top-stack">
                         {notice && (
                             <div className={`notice ${notice.kind}`} title={notice.text}>
@@ -1776,171 +1970,186 @@ function Dashboard() {
                             <div className={`status-bar ${status.kind}`} title={status.text} role="status">
                                 {status.kind === "progress" && <span className="spinner" aria-hidden="true" />}
                                 <span className="text">{status.text}</span>
+                                {status.action && (
+                                    <button type="button" className="status-action" onClick={status.action.run}>
+                                        {status.action.label}
+                                    </button>
+                                )}
                                 {status.kind !== "progress" && <CloseButton label={t("dashboard.dismiss")} onClick={clearStatus} />}
+                            </div>
+                        )}
+                        {!status && hint && (
+                            <div className="hint" role="status">
+                                {hint}
                             </div>
                         )}
                     </div>
                 )}
 
-                <div className="controls">
-                    {hasWorld && (
-                        <div
-                            className="view-toggle"
-                            role="radiogroup"
-                            aria-label={t("dashboard.viewToggle")}
-                            data-active={worldOn ? "world" : "thermal"}
-                        >
-                            <button
-                                type="button"
-                                className="view-toggle-option"
-                                role="radio"
-                                aria-checked={!worldOn}
-                                onClick={() => setWorldOn(false)}
-                            >
-                                {t("dashboard.viewThermal")}
-                            </button>
-                            <button
-                                type="button"
-                                className="view-toggle-option"
-                                role="radio"
-                                aria-checked={worldOn}
-                                disabled={
-                                    !showingPanorama ||
-                                    !current ||
-                                    !panorama!.georeferenced ||
-                                    worldOffMap ||
-                                    (!worldView && (stitching || exporting))
+                {displaySource && (
+                    <div className="controls">
+                        {hasWorld && (
+                            <div
+                                className="view-toggle"
+                                role="radiogroup"
+                                aria-label={t("dashboard.viewToggle")}
+                                data-active={viewValue}
+                                onKeyDown={(e) =>
+                                    onRadioKeys(e, RADIO_VIEWS, viewValue, (v) => v === "thermal" || !worldDisabled, pickView)
                                 }
-                                title={
-                                    worldView
-                                        ? undefined
-                                        : showingPanorama && !panorama!.georeferenced
-                                          ? t("dashboard.worldNeedsMap")
-                                          : worldOffMap
-                                            ? t("dashboard.worldNoView")
-                                            : t("dashboard.worldStitchFirst")
-                                }
-                                onClick={() => void showWorld()}
                             >
-                                {t("dashboard.viewWorld")}
-                            </button>
-                            <span className="view-toggle-thumb" aria-hidden="true"></span>
-                        </div>
-                    )}
-                    <div className="tool-group" role="group" aria-label={t("dashboard.tools")}>
-                        <button
-                            type="button"
-                            className={`tool-button${picking ? " active" : ""}`}
-                            id="color-picker"
-                            aria-pressed={picking}
-                            title={t("dashboard.newColourHint")}
-                            onClick={() => {
-                                if (!picking) setLassoMode(false);
-                                setPicking(!picking);
-                            }}
-                        >
-                            <img src={EyedropperIcon21px} alt={t("dashboard.colourPicker")} />
-                        </button>
-                        <button
-                            type="button"
-                            className={`tool-button lasso-tool${lassoMode ? " active" : ""}`}
-                            aria-pressed={lassoMode}
-                            title={t("dashboard.lassoHint")}
-                            onClick={() => {
-                                if (!lassoMode) setPicking(false);
-                                setLassoMode(!lassoMode);
-                            }}
-                        >
-                            <img src={LassoIcon21px} alt={t("dashboard.lasso")} />
-                        </button>
-                        <span className="tool-divider" aria-hidden="true" />
-                        <button
-                            type="button"
-                            className="tool-button undo-button"
-                            disabled={history.length === 0}
-                            title={t("dashboard.undoHint")}
-                            onClick={undo}
-                        >
-                            <img src={Undo21px} alt={t("dashboard.undo")} />
-                        </button>
-                    </div>
-                    <div className="slider-container" title={t("dashboard.toleranceHint")}>
-                        <input
-                            type="range"
-                            min="1"
-                            max="50"
-                            step="1"
-                            className="slider"
-                            id="hsvValue"
-                            value={tolerance}
-                            onChange={(e) => {
-                                // one drag (or one key press) is one undo step
-                                if (!toleranceStepRef.current) recordUndo();
-                                toleranceStepRef.current = true;
-                                setTolerance(Number(e.target.value));
-                            }}
-                            onPointerUp={() => (toleranceStepRef.current = false)}
-                            onKeyUp={() => (toleranceStepRef.current = false)}
-                            onBlur={() => (toleranceStepRef.current = false)}
-                        />
-                        <span className="slider-value">±{tolerance}</span>
-                    </div>
-                    <div className="download-menu" ref={downloadMenuRef}>
-                        {downloadOpen && (
-                            <div className="download-popover">
-                                {replacePrompt ? (
-                                    <div className="download-confirm">
-                                        <p>{t("dashboard.exportReplaceTitle")}</p>
-                                        <ul>
-                                            {replacePrompt.files.map((file) => (
-                                                <li key={file} title={file}>
-                                                    {file}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                        <div className="download-confirm-actions">
-                                            <button onClick={() => setReplacePrompt(null)}>{t("dashboard.exportCancel")}</button>
-                                            <button className="replace" onClick={() => void saveFiles(replacePrompt.kinds)}>
-                                                {t("dashboard.exportReplace")}
-                                            </button>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <>
-                                        {downloadItems.map(({ kind, label, reason, note }) => (
-                                            <button
-                                                key={kind}
-                                                className="download-item"
-                                                disabled={reason !== null}
-                                                onClick={() => void startDownload([kind])}
-                                            >
-                                                {label}
-                                                {(reason ?? note) && <small>{reason ?? note}</small>}
-                                            </button>
-                                        ))}
-                                        <div className="download-divider" />
-                                        <button
-                                            className="download-item all"
-                                            disabled={downloadItems.some((item) => item.reason !== null)}
-                                            onClick={() => void startDownload(downloadItems.map((item) => item.kind))}
-                                        >
-                                            {t("dashboard.downloadAll")}
-                                        </button>
-                                    </>
-                                )}
+                                <button
+                                    type="button"
+                                    className="view-toggle-option"
+                                    role="radio"
+                                    aria-checked={!worldOn}
+                                    tabIndex={worldOn ? -1 : 0}
+                                    onClick={() => setWorldOn(false)}
+                                >
+                                    {t("dashboard.viewThermal")}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="view-toggle-option"
+                                    role="radio"
+                                    aria-checked={worldOn}
+                                    tabIndex={worldOn ? 0 : -1}
+                                    disabled={worldDisabled}
+                                    title={
+                                        worldView
+                                            ? undefined
+                                            : showingPanorama && !panorama!.georeferenced
+                                              ? t("dashboard.worldNeedsMap")
+                                              : worldOffMap
+                                                ? t("dashboard.worldNoView")
+                                                : t("dashboard.worldStitchFirst")
+                                    }
+                                    onClick={() => void showWorld()}
+                                >
+                                    {t("dashboard.viewWorld")}
+                                </button>
+                                <span className="view-toggle-thumb" aria-hidden="true"></span>
                             </div>
                         )}
-                        <button
-                            className={`download-button${downloadOpen ? " open" : ""}`}
-                            onClick={() => (downloadOpen ? closeDownload() : setDownloadOpen(true))}
-                            disabled={!current || stitching || exporting}
-                            title={t("dashboard.downloadHint")}
-                            aria-expanded={downloadOpen}
-                        >
-                            <img src={Download21px} alt={t("dashboard.download")} />
-                        </button>
+                        <div className="tool-group" role="group" aria-label={t("dashboard.tools")}>
+                            <button
+                                type="button"
+                                className={`tool-button${picking ? " active" : ""}`}
+                                aria-pressed={picking}
+                                aria-label={t("dashboard.colourPicker")}
+                                title={t("dashboard.newColourHint")}
+                                onClick={() => {
+                                    if (!picking) setLassoMode(false);
+                                    setPicking(!picking);
+                                }}
+                            >
+                                <Icon src={EyedropperIcon21px} />
+                            </button>
+                            <button
+                                type="button"
+                                className={`tool-button${lassoMode ? " active" : ""}`}
+                                aria-pressed={lassoMode}
+                                aria-label={t("dashboard.lasso")}
+                                title={t("dashboard.lassoHint")}
+                                onClick={() => {
+                                    if (!lassoMode) setPicking(false);
+                                    setLassoMode(!lassoMode);
+                                }}
+                            >
+                                <Icon src={LassoIcon21px} />
+                            </button>
+                            <span className="tool-divider" aria-hidden="true" />
+                            <button
+                                type="button"
+                                className="tool-button"
+                                disabled={history.length === 0}
+                                aria-label={t("dashboard.undo")}
+                                title={t("dashboard.undoHint")}
+                                onClick={undo}
+                            >
+                                <Icon src={Undo21px} />
+                            </button>
+                        </div>
+                        <div className="slider-container" title={t("dashboard.toleranceHint")}>
+                            <input
+                                type="range"
+                                min="1"
+                                max="50"
+                                step="1"
+                                className="slider"
+                                aria-label={t("dashboard.tolerance")}
+                                value={tolerance}
+                                onChange={(e) => {
+                                    // one drag (or one key press) is one undo step
+                                    if (!toleranceStepRef.current) recordUndo();
+                                    toleranceStepRef.current = true;
+                                    setTolerance(Number(e.target.value));
+                                }}
+                                onPointerUp={() => (toleranceStepRef.current = false)}
+                                onKeyUp={() => (toleranceStepRef.current = false)}
+                                onBlur={() => (toleranceStepRef.current = false)}
+                            />
+                        </div>
+                        <div className="download-menu" ref={downloadMenuRef}>
+                            {downloadPresence.mounted && (
+                                <div className={`download-popover popover${downloadPresence.closing ? " popover-exit" : ""}`}>
+                                    {replacePrompt ? (
+                                        <div className="download-confirm">
+                                            <p>{t("dashboard.exportReplaceTitle")}</p>
+                                            <ul>
+                                                {replacePrompt.files.map((file) => (
+                                                    <li key={file} title={file}>
+                                                        {file}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                            <div className="download-confirm-actions">
+                                                <button onClick={() => setReplacePrompt(null)}>{t("dashboard.exportCancel")}</button>
+                                                <button className="replace" onClick={() => void saveFiles(replacePrompt.kinds)}>
+                                                    {t("dashboard.exportReplace")}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div className="popover-header">{t("dashboard.exportFolder")}</div>
+                                            {downloadItems.map(({ kind, label, reason, note }) => (
+                                                <button
+                                                    key={kind}
+                                                    className="download-item"
+                                                    disabled={reason !== null}
+                                                    onClick={() => void startDownload([kind])}
+                                                >
+                                                    {label}
+                                                    {(reason ?? note) && <small>{reason ?? note}</small>}
+                                                </button>
+                                            ))}
+                                            <div className="download-divider" />
+                                            <button
+                                                className="download-item all"
+                                                disabled={downloadItems.some((item) => item.reason !== null)}
+                                                onClick={() => void startDownload(downloadItems.map((item) => item.kind))}
+                                            >
+                                                {t("dashboard.downloadAll")}
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+                            <button
+                                type="button"
+                                className={`download-button${downloadOpen ? " open" : ""}`}
+                                onClick={() => (downloadOpen ? closeDownload() : openDownload())}
+                                disabled={!current || busy}
+                                title={t("dashboard.downloadHint")}
+                                aria-label={t("dashboard.download")}
+                                aria-expanded={downloadOpen}
+                            >
+                                <Icon src={Download21px} />
+                            </button>
+                        </div>
                     </div>
-                </div>
+                )}
 
                 {/* outside the centred controls row, so the slider never moves while dragging */}
                 {busyText && (

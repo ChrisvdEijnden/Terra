@@ -153,6 +153,9 @@ export const stageExportMask = (mask: Uint8Array): Promise<void> => invoke<void>
 export const exportFiles = (request: ExportRequest): Promise<ExportResult> =>
     invoke<ExportResult>("export_files", { request });
 
+/** Opens the project's export folder in Finder. */
+export const revealExportFolder = (): Promise<void> => invoke<void>("reveal_export_folder");
+
 export const STITCH_CANCELLED = "Stitching cancelled";
 
 /** A single human-readable line from whatever a command rejected with. */

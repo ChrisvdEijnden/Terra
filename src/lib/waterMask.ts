@@ -361,8 +361,8 @@ export function packRgba(r: number, g: number, b: number, a: number): number {
         : ((r << 24) | (g << 16) | (b << 8) | a) >>> 0;
 }
 
-export const OVERLAY_FILL = packRgba(0x94, 0xa3, 0xb8, 128); // selected water, translucent slate
-export const OVERLAY_EDGE = packRgba(0x0d, 0x94, 0x88, 255); // selected outline, brand teal
+export const OVERLAY_FILL = packRgba(0x14, 0xb8, 0xa6, 190); // selected water, translucent brand teal
+export const OVERLAY_EDGE = packRgba(0x5e, 0xea, 0xd4, 255); // selected outline, light teal (stands out on purple)
 export const OVERLAY_DESELECTED_EDGE = packRgba(160, 160, 160, 255); // deselected outline, grey
 export const OVERLAY_OUTSIDE_FILL = packRgba(0xdc, 0x26, 0x26, 128); // outside the lasso, translucent red
 export const OVERLAY_OUTSIDE_EDGE = packRgba(0xdc, 0x26, 0x26, 255); // lasso outline, red

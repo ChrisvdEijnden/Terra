@@ -21,7 +21,8 @@ export interface Padding {
     left: number;
 }
 
-export const DEFAULT_PADDING: Padding = { top: 16, right: 16, bottom: 64, left: 16 };
+/** The top keeps the status pill clear (top 12 + height 30 + gap 12), the bottom the controls. */
+export const DEFAULT_PADDING: Padding = { top: 54, right: 16, bottom: 64, left: 16 };
 /** Maximum zoom: 32 screen pixels per image pixel. */
 export const MAX_SCALE = 32;
 /** Minimum zoom relative to the fit scale. */
@@ -50,13 +51,24 @@ export function fitView(image: Size, viewport: Size, pad: Padding = DEFAULT_PADD
     };
 }
 
-function clampAxis(offset: number, drawn: number, viewportLen: number, padStart: number, padEnd: number): number {
-    // A small image stays inside the padded area; a large one can be panned until
-    // either edge reaches the padding, so every pixel can be brought on screen.
+/** Allowed offsets on one axis. A small image stays inside the padded area; a large one
+ *  can be panned until either edge reaches the padding, so every pixel can be brought on screen. */
+export function offsetRange(drawn: number, viewportLen: number, padStart: number, padEnd: number): { lo: number; hi: number } {
     const a = padStart;
     const b = viewportLen - padEnd - drawn;
-    const lo = Math.min(a, b);
-    const hi = Math.max(a, b);
+    return { lo: Math.min(a, b), hi: Math.max(a, b) };
+}
+
+/** Allowed offsets of both axes at this view's scale. */
+export function offsetRanges(view: View, image: Size, viewport: Size, pad: Padding = DEFAULT_PADDING) {
+    return {
+        x: offsetRange(image.width * view.scale, viewport.width, pad.left, pad.right),
+        y: offsetRange(image.height * view.scale, viewport.height, pad.top, pad.bottom),
+    };
+}
+
+function clampAxis(offset: number, drawn: number, viewportLen: number, padStart: number, padEnd: number): number {
+    const { lo, hi } = offsetRange(drawn, viewportLen, padStart, padEnd);
     return Math.min(hi, Math.max(lo, offset));
 }
 

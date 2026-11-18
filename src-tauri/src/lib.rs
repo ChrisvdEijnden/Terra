@@ -143,6 +143,7 @@ pub fn run() {
             commands::export_conflicts,
             commands::stage_export_mask,
             commands::export_files,
+            commands::reveal_export_folder,
             commands::recent_projects,
             commands::open_recent,
             commands::delete_project,
