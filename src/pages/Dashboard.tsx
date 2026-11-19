@@ -1581,7 +1581,8 @@ function Dashboard() {
         };
     }, [zoomBy, stopMotion, requestDraw]);
 
-    // Keyboard: 0 = fit, +/- = zoom, Escape = leave picking mode.
+    // Keyboard: 0 = fit, +/- = zoom, Escape = leave picking mode, Alt+Tab = Thermal/Photo.
+    const toggleViewRef = useRef(() => {});
     const refHueRef = useRef(refHue);
     refHueRef.current = refHue;
     const lassoModeRef = useRef(lassoMode);
@@ -1596,6 +1597,11 @@ function Dashboard() {
                 if (typing) return;
                 e.preventDefault();
                 undoRef.current();
+                return;
+            }
+            if (e.altKey && !e.metaKey && !e.ctrlKey && e.key === "Tab") {
+                e.preventDefault();
+                toggleViewRef.current();
                 return;
             }
             if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -1664,6 +1670,10 @@ function Dashboard() {
         !showingPanorama || !current || !panorama!.georeferenced || worldOffMap || (!worldView && (stitching || exporting));
     const viewValue = worldOn ? "world" : "thermal";
     const pickView = (view: (typeof RADIO_VIEWS)[number]) => (view === "world" ? void showWorld() : setWorldOn(false));
+    // same rules as the toggle: no switch without a photo view, nor to a disabled one
+    toggleViewRef.current = () => {
+        if (hasWorld && (worldOn || !worldDisabled)) pickView(worldOn ? "thermal" : "world");
+    };
 
     return (
         <div>
